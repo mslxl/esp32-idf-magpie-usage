@@ -12,3 +12,15 @@
 ## Agent skills
 
 项目级 skills 位于 `.claude/skills/`，来源与说明见 `.claude/skills/README.md`。
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues, driven by the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five default roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain.md`.
