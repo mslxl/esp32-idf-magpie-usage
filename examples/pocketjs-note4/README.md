@@ -35,7 +35,38 @@ The test covers 1bpp full-frame conversion, luminance thresholding, MSB-first pa
 
 ## Build
 
-From this directory, in an ESP-IDF 6.1 shell:
+The repository root provides a parameterized `justfile`. From the repository
+root in an ESP-IDF 6.1 shell, initialize the submodule and run:
+
+```powershell
+git submodule update --init --recursive
+just build
+```
+
+The default build output is `.pocket-build/idf`. Override it without editing
+scripts:
+
+```powershell
+$env:NOTE4_BUILD_DIR = "D:/builds/note4"
+just build
+```
+
+For an existing package, pass its path through the environment:
+
+```powershell
+$env:POCKETJS_NOTE4_PACKAGE = "C:/packages/note4-hello.pocket"
+just build-package
+```
+
+The individual recipes are `just prepare`, `just test`, `just build`,
+`just build-package`, `just verify-backup`, `just device-info`, `just flash`,
+`just monitor`, and `just clean`. The serial port defaults to `COM5` and can
+be changed with `NOTE4_PORT`. The backup path defaults to
+`note4-build/original-flash/note4-com5-original-16MiB.bin`; set
+`NOTE4_BACKUP` and optionally `NOTE4_BACKUP_SHA256` to use another verified
+backup.
+
+The equivalent direct commands, when working inside this directory, are:
 
 ```powershell
 python -I tools/prepare_pocketjs.py
@@ -44,12 +75,6 @@ python -I tools/extract_waveform.py
 $env:RUSTUP_TOOLCHAIN = "esp"
 idf.py set-target esp32s3
 idf.py build
-```
-
-For an existing package:
-
-```powershell
-idf.py -DPOCKETJS_NOTE4_PACKAGE=C:/absolute/path/note4-hello.pocket build
 ```
 
 ## Hardware gate before flashing
