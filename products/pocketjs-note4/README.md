@@ -1,6 +1,6 @@
-# PocketJS on ZECTRIX NOTE4: Hello World
+# PocketJS NOTE4 Product Firmware
 
-This proof project renders a PocketJS `Hello World` scene at 400×300 and presents it on the NOTE4 SSD2683 panel. The display path keeps a persistent RGB565 scene, converts ordinary UI damage to 1bpp, and converts selected grayscale UI regions to 4bpp.
+This product firmware renders a PocketJS `Hello World` scene at 400×300 and presents it on the NOTE4 SSD2683 panel. The display path keeps a persistent RGB565 scene, converts ordinary UI damage to 1bpp, and converts selected grayscale UI regions to 4bpp.
 
 The first supported refresh policy is **1bpp partial refresh plus 4bpp full-screen refresh**. A 4bpp update always covers the full panel. Returning from 4bpp to 1bpp performs a full 1bpp rebase before partial updates resume. 4bpp partial waveform support is not enabled.
 
@@ -36,7 +36,7 @@ The test covers 1bpp full-frame conversion, luminance thresholding, MSB-first pa
 ## Build
 
 The repository root provides a parameterized `justfile`. From the repository
-root in an ESP-IDF 6.1 shell, initialize the submodule and run:
+root, initialize the submodule and run:
 
 ```powershell
 git submodule update --init --recursive
@@ -66,7 +66,7 @@ be changed with `NOTE4_PORT`. The backup path defaults to
 `NOTE4_BACKUP` and optionally `NOTE4_BACKUP_SHA256` to use another verified
 backup.
 
-The equivalent direct commands, when working inside this directory, are:
+The equivalent direct commands, when working inside this product directory, are:
 
 ```powershell
 python -I tools/prepare_pocketjs.py
@@ -91,7 +91,7 @@ After those checks, use the exact port:
 idf.py -p COM5 flash monitor
 ```
 
-A successful proof requires the physical panel to show the PocketJS-produced scene. Build success and serial output alone do not establish display correctness.
+Product validation requires the physical panel to show the PocketJS-produced scene. Build success and serial output alone do not establish display correctness.
 
 ## Display and power behavior
 

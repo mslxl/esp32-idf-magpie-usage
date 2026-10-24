@@ -1,7 +1,7 @@
 set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 repo_root := justfile_directory()
-project := repo_root + "/examples/pocketjs-note4"
+project := repo_root + "/products/pocketjs-note4"
 test_project := project + "/tests"
 build_dir := env_var_or_default("NOTE4_BUILD_DIR", project + "/.pocket-build/idf")
 test_build_dir := test_project + "/build"
