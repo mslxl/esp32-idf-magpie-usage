@@ -2,7 +2,7 @@
 
 **Access date:** 2026-10-23
 
-**Scope:** PocketJS at its current official `main` source revision `e27bff3e96df3c7b3c8263a34f2362b964df04fb` and the ZECTRIX NOTE4 development guide. The companion example in this repository now validates the static 1-bpp path on a physical NOTE4 PCB v1.0.
+**Scope:** PocketJS at its current official `main` source revision `e27bff3e96df3c7b3c8263a34f2362b964df04fb` and the ZECTRIX NOTE4 development guide. The companion example in this repository validates the 1bpp and 4bpp display adapters and builds the first partial-refresh policy for NOTE4 PCB v1.0.
 
 ## Source-backed facts
 
@@ -27,7 +27,7 @@
 
 **Hardware target match, with a deliberate SDK and display adapter.** PocketJS explicitly provides an ESP-IDF host for ESP32-S3 and an Xtensa-targeted native build, so NOTE4's ESP32-S3 silicon aligns with PocketJS's stated S3 target. PocketJS's current component manifests and CI target ESP-IDF 6.0/6.1, so the proof uses ESP-IDF 6.1 and keeps that SDK as an external installation prerequisite. The ordinary PocketJS S3 UI path uses software RGB565 rendering; its P4-only PPA accelerator is not applicable.
 
-**The significant gap is device integration.** PocketJS assigns panel initialization, framebuffer/display presentation, hardware input drivers and task ownership to the product firmware, and its examples do not implement NOTE4’s SSD2683 or GPIO/I2C/I2S hardware. The committed example supplies the needed static adapter: it renders PocketJS RGB565 strips, converts them to NOTE4’s 400×300 1-bpp framebuffer, preserves the GPIO17 power latch, and calls the pinned driver's full-refresh API. The resulting firmware was flashed to the confirmed NOTE4 device on COM5 after a complete 16 MiB original-flash backup, and the physical panel displayed PocketJS-generated `Hello World`. Partial refresh, animation, input, sleep, audio, I2C, and 4-bpp waveform behavior remain outside this proof.
+**The significant gap is device integration.** PocketJS assigns panel initialization, framebuffer/display presentation, hardware input drivers and task ownership to the product firmware, and its examples do not implement NOTE4’s SSD2683 or GPIO/I2C/I2S hardware. The committed example supplies the display module: it keeps a persistent PocketJS RGB565 frame, converts ordinary damage to NOTE4 1bpp partial patches, converts selected UI regions to a full-screen 4bpp frame, preserves the GPIO17 power latch, and uses a compact production waveform payload extracted from the pinned NOTE4 source. A successful 4bpp refresh invalidates the driver's 1bpp transition shadow, so the next 1bpp update performs a full rebase. The original static 1bpp firmware was flashed to the confirmed NOTE4 device on COM5 after a complete 16 MiB original-flash backup, and the physical panel displayed PocketJS-generated `Hello World`; this new refresh policy still needs device validation. Animation, input, sleep, audio, I2C and 4bpp partial waveform behavior remain outside this proof.
 
 **License scope.** The MIT license covers PocketJS and MicroTS. The Pocket3D title-card condition applies to distributed products that use Pocket3D to draw 3D scenes; an ordinary PocketJS-only 2D app is documented as exempt. Audit the exact shipped components and dependencies before redistribution.
 

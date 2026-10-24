@@ -17,3 +17,4 @@ note4-build/
 **/__pycache__/
 **/*.pyc
 **/*.pdb
+**/.pocket-build/

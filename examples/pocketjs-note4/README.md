@@ -1,44 +1,47 @@
 # PocketJS on ZECTRIX NOTE4: Hello World
 
-A deliberately small proof project: PocketJS renders a static `Hello World` scene at 400×300, the firmware converts RGB565 output to the NOTE4 SSD2683 driver's 1-bpp row-major/MSB-first format, and performs one full panel refresh.
+This proof project renders a PocketJS `Hello World` scene at 400×300 and presents it on the NOTE4 SSD2683 panel. The display path keeps a persistent RGB565 scene, converts ordinary UI damage to 1bpp, and converts selected grayscale UI regions to 4bpp.
 
-This is not a general e-paper PocketJS backend. It does not poll buttons, support partial refresh, animate, manage sleep, or initialize NOTE4 audio/I2C peripherals.
+The first supported refresh policy is **1bpp partial refresh plus 4bpp full-screen refresh**. A 4bpp update always covers the full panel. Returning from 4bpp to 1bpp performs a full 1bpp rebase before partial updates resume. 4bpp partial waveform support is not enabled.
 
 ## Pinned provenance
 
 - PocketJS: [`e27bff3e96df3c7b3c8263a34f2362b964df04fb`](https://github.com/pocket-nexus/pocketjs/tree/e27bff3e96df3c7b3c8263a34f2362b964df04fb)
 - NOTE4 reference firmware and `zectrix_epd`: [`ca285c98ed0641f86780edb1f5ec77b0335fe649`](https://github.com/itopinion/zectrix-note4-epd-demo/tree/ca285c98ed0641f86780edb1f5ec77b0335fe649)
 
-`tools/fetch_deps.py` fetches those revisions into ignored `deps/` directories, and refuses to overwrite an existing checkout at another revision or with local changes.
+`third_party/pocketjs` is a Git submodule pinned to the PocketJS revision. The NOTE4 source tree tracks only the extracted `components/zectrix_epd` module. `tools/prepare_pocketjs.py` creates the ignored JavaScript junctions and the ignored QuickJS preparation overlay required by the pinned PocketJS/quickjs-ng combination; it leaves the submodule clean.
+
+The original NOTE4 waveform generator is retained as provenance and extraction input. Its five semantic assertions do not agree with the generated final tables under ESP-IDF 6.1, so firmware includes the generated `ssd2683_waveform_production.h` payload instead. The extractor validates the 5 × 535-byte payload dimensions, vendor analog prefix, code-0 hold table, and FNV-1a hashes.
 
 ## Requirements
 
 - The black-and-white ZECTRIX NOTE4 PCB v1.0 (not NOTE4C).
-- ESP-IDF 6.1 installed through Espressif's normal SDK installation flow. PocketJS's components declare `>=6.0,<6.2`; IDF 5.x is unsupported by this example. The SDK checkout is intentionally external to this repository rather than vendored as a submodule.
-- Python 3 to fetch dependencies.
-- `pocket` CLI plus Bun (for compiling the TypeScript app), or a prebuilt `note4-hello.pocket` supplied with `-DPOCKETJS_NOTE4_PACKAGE=...`.
-- The PocketJS ESP32-S3 Rust native toolchain/archives described in its ESP-IDF integration documentation. This project deliberately enables `POCKETJS_RUST_FROM_SOURCE` by default for reproducibility.
+- ESP-IDF 6.1 installed through Espressif's normal SDK installation flow. PocketJS declares `>=6.0,<6.2`; IDF 5.x is unsupported. The SDK checkout remains external to this repository.
+- Python 3.
+- The `pocket` CLI plus Bun for compiling the TypeScript app, or a prebuilt `note4-hello.pocket` supplied with `-DPOCKETJS_NOTE4_PACKAGE=...`.
+- The PocketJS ESP32-S3 Rust toolchain. Set `RUSTUP_TOOLCHAIN=esp` when building from source.
 
 ## Host conversion test
 
-With a C compiler (or Zig):
+With Visual Studio, Zig, or another C compiler:
 
 ```powershell
-zig cc -std=c11 -Wall -Wextra -Werror -pedantic `
-  -I main tests/test_display_adapter.c main/display_adapter.c `
-  -o tests/test_display_adapter.exe
-./tests/test_display_adapter.exe
+cmake -S tests -B tests/build
+cmake --build tests/build --config Debug
+ctest --test-dir tests/build -C Debug --output-on-failure
 ```
 
-The test covers byte count, black/white conversion, RGB565 luminance thresholding, MSB-first packing, strip offsets, row edges, and argument bounds.
+The test covers 1bpp full-frame conversion, luminance thresholding, MSB-first packing, strip offsets, row edges, 4bpp high/low nibble packing, grayscale quantization, rectangle conversion, guard bytes, and argument bounds.
 
 ## Build
 
-From this directory, in an ESP-IDF 6.0/6.1 shell:
+From this directory, in an ESP-IDF 6.1 shell:
 
 ```powershell
-python -I tools/fetch_deps.py
+python -I tools/prepare_pocketjs.py
 python -I tools/prepare_deps.py
+python -I tools/extract_waveform.py
+$env:RUSTUP_TOOLCHAIN = "esp"
 idf.py set-target esp32s3
 idf.py build
 ```
@@ -63,11 +66,14 @@ After those checks, use the exact port:
 idf.py -p COM5 flash monitor
 ```
 
-A successful proof is a physical full refresh displaying PocketJS-produced `Hello World`, not only a successful build or serial log.
+A successful proof requires the physical panel to show the PocketJS-produced scene. Build success and serial output alone do not establish display correctness.
 
 ## Display and power behavior
 
-- `display_adapter.c` maps RGB565 to 1-bpp by an initial luminance threshold of 128; it does not dither.
-- The adapter expects PocketJS's full-width RGB565 strips and preserves the SSD2683 contract: 400×300, 15,000 bytes, MSB first, `1 = white`.
+- `display_adapter.c` maps RGB565 to 1bpp with an initial luminance threshold of 128 and maps grayscale regions to 4bpp levels 0..15. It does not dither.
+- 1bpp output is 400×300, row-major, MSB-first, and 15,000 bytes. The SSD2683 driver maintains an old-image shadow for transition-based partial refresh.
+- 4bpp output is 400×300, two pixels per byte, high nibble first, and 60,000 bytes. Non-grayscale pixels in a 4bpp frame use only black or white levels.
+- A damage update that intersects a grayscale UI region uses one full 4bpp refresh. Other damage uses 1bpp partial refresh after a valid full 1bpp baseline.
+- After a 4bpp refresh, the driver invalidates the 1bpp shadow. The next 1bpp presentation performs a full rebase before partial refreshes.
 - The firmware holds NOTE4 GPIO17 high before driver initialization, following the public reference board's battery-latch sequence.
-- The pinned driver is prepared for IDF 6.x by exporting `esp_driver_gpio`/`esp_driver_spi`; this proof keeps the driver’s experimental 4-bpp waveform path disabled and validates the public 1-bpp refresh path.
+- The full 4bpp path uses the pinned production payload and its external-waveform pass sequence. The panel's visible gray states and refresh timing remain temperature- and waveform-dependent.

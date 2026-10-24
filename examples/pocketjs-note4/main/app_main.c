@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 #include "driver/gpio.h"
-#include "esp_heap_caps.h"
+#include "esp_check.h"
 #include "esp_log.h"
 #include "pocketjs/guest.h"
 #include "pocketjs/package.h"
@@ -13,6 +13,7 @@
 #include "zectrix_epd.h"
 
 #include "display_adapter.h"
+#include "note4_presenter.h"
 
 #define NOTE4_VBAT_LATCH GPIO_NUM_17
 
@@ -32,49 +33,58 @@ static void keep_battery_latch_enabled(void) {
     gpio_hold_en(NOTE4_VBAT_LATCH);
 }
 
-static void render_frame(pocketjs_ui_frame_view_t *frame,
-                         pocketjs_rgb565_renderer_t *renderer,
-                         pocketjs_rgb565_target_t *target,
-                         uint8_t *epaper_frame) {
+static esp_err_t render_and_present(
+    pocketjs_ui_frame_view_t *frame, pocketjs_rgb565_renderer_t *renderer,
+    pocketjs_rgb565_target_t *target, note4_presenter_t *presenter,
+    zectrix_epd_handle_t epd) {
     pocketjs_rgb565_damage_plan_t plan = {.struct_size = sizeof(plan)};
-    ESP_ERROR_CHECK(pocketjs_rgb565_prepare(renderer, target, frame, &plan));
-    if (frame->logical_width != NOTE4_WIDTH ||
-        frame->logical_height != NOTE4_HEIGHT || !plan.full_redraw) {
-        ESP_LOGE(TAG, "expected a 400x300 full redraw");
-        abort();
+    ESP_RETURN_ON_ERROR(pocketjs_rgb565_prepare(renderer, target, frame, &plan), TAG,
+                        "PocketJS prepare failed");
+    if (frame->logical_width != NOTE4_WIDTH || frame->logical_height != NOTE4_HEIGHT) {
+        pocketjs_rgb565_abort(renderer, target);
+        return ESP_ERR_INVALID_SIZE;
     }
 
-    uint16_t *rgb565_frame = heap_caps_malloc(
-        NOTE4_WIDTH * NOTE4_HEIGHT * sizeof(*rgb565_frame),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    assert(rgb565_frame != NULL);
-    for (size_t pixel = 0; pixel < NOTE4_WIDTH * NOTE4_HEIGHT; ++pixel) {
-        rgb565_frame[pixel] = 0xFFFF;
+    uint16_t *rgb565_frame = note4_presenter_rgb565_frame(presenter);
+    if (rgb565_frame == NULL) {
+        pocketjs_rgb565_abort(renderer, target);
+        return ESP_ERR_INVALID_STATE;
     }
-
+    note4_rect_t damage[8];
     for (uint32_t index = 0; index < plan.region_count; ++index) {
         const pocketjs_rgb565_rect_t region = plan.regions[index];
         if (region.x >= NOTE4_WIDTH || region.y >= NOTE4_HEIGHT ||
             region.width > NOTE4_WIDTH - region.x ||
             region.height > NOTE4_HEIGHT - region.y) {
-            ESP_LOGE(TAG, "renderer returned an out-of-range damage region");
-            abort();
+            pocketjs_rgb565_abort(renderer, target);
+            return ESP_ERR_INVALID_ARG;
         }
+        damage[index] = (note4_rect_t){region.x, region.y, region.width, region.height};
         const size_t strip_pixels = (size_t)NOTE4_WIDTH * region.height;
         uint16_t *strip = rgb565_frame + (size_t)region.y * NOTE4_WIDTH;
         pocketjs_rgb565_render_stats_t stats = {.struct_size = sizeof(stats)};
-        ESP_ERROR_CHECK(pocketjs_rgb565_render_strip(
-            renderer, frame, strip, strip_pixels, region, NULL, &stats));
+        esp_err_t err = pocketjs_rgb565_render_strip(
+            renderer, frame, strip, strip_pixels, region, NULL, &stats);
+        if (err != ESP_OK) {
+            pocketjs_rgb565_abort(renderer, target);
+            return err;
+        }
     }
 
-    if (!note4_rgb565_to_1bpp_rows(
-            rgb565_frame, NOTE4_WIDTH * NOTE4_HEIGHT, 0, NOTE4_HEIGHT,
-            epaper_frame, NOTE4_FRAME_BYTES, 128)) {
-        ESP_LOGE(TAG, "RGB565 conversion failed");
-        abort();
+    const note4_rect_t gray_regions[] = {{120, 90, 160, 120}};
+    note4_present_mode_t mode;
+    esp_err_t err = note4_presenter_present(
+        presenter, epd, damage, plan.region_count, plan.full_redraw,
+        gray_regions, 1U, 128, &mode);
+    if (err != ESP_OK) {
+        pocketjs_rgb565_abort(renderer, target);
+        return err;
     }
-    heap_caps_free(rgb565_frame);
-    ESP_ERROR_CHECK(pocketjs_rgb565_commit(renderer, target, frame));
+    ESP_RETURN_ON_ERROR(pocketjs_rgb565_commit(renderer, target, frame), TAG,
+                        "PocketJS commit failed");
+    ESP_LOGI(TAG, "PocketJS frame presented in %s mode",
+             mode == NOTE4_PRESENT_MODE_GRAY ? "4bpp" : "1bpp");
+    return ESP_OK;
 }
 
 void app_main(void) {
@@ -126,23 +136,20 @@ void app_main(void) {
     ESP_ERROR_CHECK(pocketjs_rgb565_renderer_create(&renderer_config, &renderer));
     ESP_ERROR_CHECK(pocketjs_rgb565_target_create(&target));
 
-    uint8_t *epaper_frame = heap_caps_malloc(
-        NOTE4_FRAME_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    assert(epaper_frame != NULL);
-    render_frame(&frame, renderer, target, epaper_frame);
+    note4_presenter_t *presenter = NULL;
+    ESP_ERROR_CHECK(note4_presenter_create(&presenter));
 
     zectrix_epd_config_t epd_config;
     zectrix_epd_get_default_config(&epd_config);
     zectrix_epd_handle_t epd = NULL;
     ESP_ERROR_CHECK(zectrix_epd_new(&epd_config, &epd));
     ESP_ERROR_CHECK(zectrix_epd_power_on(epd));
-    ESP_ERROR_CHECK(zectrix_epd_refresh_full_1bpp(
-        epd, epaper_frame, NOTE4_FRAME_BYTES));
-    ESP_LOGI(TAG, "PocketJS Hello World full refresh complete");
+    ESP_ERROR_CHECK(render_and_present(&frame, renderer, target, presenter, epd));
+    ESP_LOGI(TAG, "PocketJS Hello World refresh complete");
     ESP_ERROR_CHECK(zectrix_epd_power_off(epd));
     ESP_ERROR_CHECK(zectrix_epd_del(epd));
 
-    heap_caps_free(epaper_frame);
+    note4_presenter_destroy(presenter);
     pocketjs_rgb565_target_destroy(target);
     pocketjs_rgb565_renderer_destroy(renderer);
     pocketjs_guest_destroy(guest);

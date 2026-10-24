@@ -1,50 +1,30 @@
-"""Fetch exact upstream revisions locally; never reset an existing checkout."""
+"""Check the PocketJS submodule required by the NOTE4 example."""
 
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-DEPENDENCIES = (
-    ("pocketjs", "https://github.com/pocket-nexus/pocketjs.git",
-     "e27bff3e96df3c7b3c8263a34f2362b964df04fb"),
-    ("note4", "https://github.com/itopinion/zectrix-note4-epd-demo.git",
-     "ca285c98ed0641f86780edb1f5ec77b0335fe649"),
-)
+POCKETJS = ROOT.parent.parent / "third_party" / "pocketjs"
+REVISION = "e27bff3e96df3c7b3c8263a34f2362b964df04fb"
 
 
-def git(path, *args, capture=False):
-    return subprocess.run(
-        ["git", "-C", str(path), *args], check=True,
-        stdout=subprocess.PIPE if capture else None, text=True,
-    ).stdout
-
-
-def head(path):
-    result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--verify", "HEAD"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-    )
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
-def main():
-    for name, url, revision in DEPENDENCIES:
-        destination = ROOT / "deps" / name
-        if not destination.exists():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            git(ROOT, "init", str(destination))
-            git(destination, "remote", "add", "origin", url)
-
-        current = head(destination)
-        if current is None:
-            git(destination, "fetch", "--depth=1", "origin", revision)
-            git(destination, "checkout", "--detach", "FETCH_HEAD")
-            current = head(destination)
-        if current != revision:
-            raise SystemExit(f"{destination}: wrong revision; left unchanged")
-        if git(destination, "status", "--porcelain", capture=True).strip():
-            raise SystemExit(f"{destination}: local changes; left unchanged")
-        print(f"{name}: {revision}", flush=True)
+def main() -> None:
+    path = POCKETJS.resolve()
+    if not (path / "hosts" / "esp-idf" / "components" / "pocketjs_guest").exists():
+        raise SystemExit("PocketJS submodule is missing; run git submodule update --init --recursive")
+    current = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if current != REVISION:
+        raise SystemExit(f"PocketJS submodule is at {current}, expected {REVISION}")
+    status = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if status:
+        raise SystemExit("PocketJS submodule has local changes; restore it before building")
+    print(f"pocketjs: {REVISION}", flush=True)
 
 
 if __name__ == "__main__":

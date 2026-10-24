@@ -5,10 +5,10 @@ set(note4_hello_requires
     pocketjs_ui_qjs
     pocketjs_render_rgb565
     zectrix_epd
-    driver)
+    esp_driver_gpio)
 
 idf_component_register(
-    SRCS "app_main.c" "display_adapter.c"
+    SRCS "app_main.c" "display_adapter.c" "note4_presenter.c"
     INCLUDE_DIRS "."
     REQUIRES ${note4_hello_requires})
 

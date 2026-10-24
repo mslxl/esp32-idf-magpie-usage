@@ -14,6 +14,8 @@
 static uint16_t pixels[NOTE4_WIDTH * NOTE4_HEIGHT];
 static uint8_t guarded_frame[NOTE4_FRAME_BYTES + 2U];
 static uint8_t *const frame = guarded_frame + 1U;
+static uint8_t guarded_gray[NOTE4_4BPP_FRAME_BYTES + 2U];
+static uint8_t *const gray = guarded_gray + 1U;
 
 static void reset_frame(void) {
     memset(guarded_frame, 0xA5, sizeof(guarded_frame));
@@ -83,6 +85,35 @@ static void test_luminance_and_threshold(void) {
     check_guards();
 }
 
+static void test_4bpp_and_rectangles(void) {
+    memset(pixels, 0, sizeof(pixels));
+    pixels[0] = 0xFFFF;
+    pixels[1] = 0x7BEF;
+    pixels[2] = 0x0000;
+    const note4_rect_t gray_region = {0, 0, 3, 1};
+    memset(guarded_gray, 0xA5, sizeof(guarded_gray));
+    CHECK(note4_rgb565_to_4bpp_frame(
+        pixels, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH, &gray_region, 1,
+        gray, NOTE4_4BPP_FRAME_BYTES, 128));
+    CHECK(gray[0] == 0xF7);
+    CHECK(gray[1] == 0x00);
+    CHECK(guarded_gray[0] == 0xA5);
+    CHECK(guarded_gray[NOTE4_4BPP_FRAME_BYTES + 1U] == 0xA5);
+
+    memset(guarded_frame, 0xA5, sizeof(guarded_frame));
+    memset(pixels, 0, sizeof(pixels));
+    pixels[10] = 0xFFFF;
+    pixels[11] = 0xFFFF;
+    pixels[410] = 0xFFFF;
+    const note4_rect_t rect = {10, 0, 2, 2};
+    CHECK(note4_rgb565_to_1bpp_rect(
+        pixels, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH, rect, frame, 2, 128));
+    CHECK(frame[0] == 0xC0);
+    CHECK(frame[1] == 0x80);
+    CHECK(guarded_frame[0] == 0xA5);
+    CHECK(guarded_frame[NOTE4_FRAME_BYTES + 1U] == 0xA5);
+}
+
 static void test_rejected_arguments(void) {
     reset_frame();
     CHECK(!note4_rgb565_to_1bpp_rows(NULL, 400, 0, 1, frame, NOTE4_FRAME_BYTES, 128));
@@ -102,7 +133,8 @@ int main(void) {
     test_full_frames();
     test_bit_order_rows_and_edges();
     test_luminance_and_threshold();
+    test_4bpp_and_rectangles();
     test_rejected_arguments();
-    puts("PASS: full frames, bit order, strip offsets, edges, luminance, bounds");
+    puts("PASS: 1bpp, 4bpp, rectangles, luminance, and bounds");
     return EXIT_SUCCESS;
 }
