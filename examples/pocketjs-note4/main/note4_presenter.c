@@ -93,13 +93,21 @@ esp_err_t note4_presenter_present(
         }
     }
     if (gray_refresh) {
+        /* SSD2683 4bpp refresh does not establish the 1bpp shadow base.
+         * Follow the reference NOTE4 scene sequence: white 1bpp base first,
+         * then the calibrated external-waveform gray refresh. */
+        memset(presenter->bw, 0xFF, NOTE4_FRAME_BYTES);
+        esp_err_t err = zectrix_epd_refresh_full_1bpp(
+            epd, presenter->bw, NOTE4_FRAME_BYTES);
+        if (err != ESP_OK) return err;
+
         if (!note4_rgb565_to_4bpp_frame(
                 presenter->rgb565, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH,
                 gray_regions, gray_region_count, presenter->gray,
                 NOTE4_4BPP_FRAME_BYTES, threshold)) {
             return ESP_ERR_INVALID_ARG;
         }
-        esp_err_t err = zectrix_epd_refresh_full_4bpp(
+        err = zectrix_epd_refresh_full_4bpp(
             epd, presenter->gray, NOTE4_4BPP_FRAME_BYTES);
         if (err == ESP_OK) {
             presenter->has_frame = true;
