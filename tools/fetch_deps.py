@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-POCKETJS = ROOT.parent.parent / "third_party" / "pocketjs"
+POCKETJS = ROOT / "third_party" / "pocketjs"
 REVISION = "e27bff3e96df3c7b3c8263a34f2362b964df04fb"
 
 

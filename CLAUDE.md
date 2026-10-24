@@ -35,7 +35,7 @@ git submodule update --init --recursive
 just prepare
 ```
 
-`just build` 会调用仓库锁定的 `third_party/pocketjs/tools/pocket.ts` 生成应用包，再用 ESP-IDF 构建 ESP32-S3 固件。它不会使用系统 PATH 中可能存在的其他 PocketJS CLI。默认构建目录是 `products/pocketjs-note4/.pocket-build/idf`；如需缩短 Windows 路径或更换目录，可以设置：
+`just build` 会调用仓库锁定的 `third_party/pocketjs/tools/pocket.ts` 生成应用包，再用 ESP-IDF 构建 ESP32-S3 固件。它不会使用系统 PATH 中可能存在的其他 PocketJS CLI。默认构建目录是 `.pocket-build/idf`；如需缩短 Windows 路径或更换目录，可以设置：
 
 ```powershell
 $env:NOTE4_BUILD_DIR = "C:/n4idf"

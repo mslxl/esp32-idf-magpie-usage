@@ -6,7 +6,7 @@ import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY = ROOT.parent.parent
+REPOSITORY = ROOT
 POCKETJS = REPOSITORY / "third_party" / "pocketjs"
 FRAMEWORK_LINK = ROOT / "node_modules" / "@pocketjs" / "framework"
 SOLID_LINK = POCKETJS / "framework" / "node_modules" / "solid-js"

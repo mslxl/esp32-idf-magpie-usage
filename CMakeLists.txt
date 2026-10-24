@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-set(pocketjs_root "${CMAKE_CURRENT_LIST_DIR}/../../third_party/pocketjs")
+set(pocketjs_root "${CMAKE_CURRENT_LIST_DIR}/third_party/pocketjs")
 set(pocketjs_components "${pocketjs_root}/hosts/esp-idf/components")
 set(pocketjs_overlay "${CMAKE_CURRENT_LIST_DIR}/.pocket-build/pocketjs-overlay")
 set(note4_component "${CMAKE_CURRENT_LIST_DIR}/components/zectrix_epd")
