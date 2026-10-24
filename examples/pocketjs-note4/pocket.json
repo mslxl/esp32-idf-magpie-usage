@@ -1,0 +1,22 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.note4.pocketjs.hello",
+  "name": "note4-hello",
+  "title": "NOTE4 Hello World",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": ["text.glyphs.baked"]
+    }
+  },
+  "app": {
+    "entry": "main.tsx",
+    "output": "note4-hello",
+    "framework": "solid",
+    "viewport": {
+      "logical": [400, 300],
+      "presentation": "native"
+    }
+  }
+}

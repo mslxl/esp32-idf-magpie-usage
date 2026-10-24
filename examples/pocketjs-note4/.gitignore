@@ -1,0 +1,13 @@
+/deps/
+/build/
+/tests/build/
+/tests/test_display_adapter.exe
+/tests/*.pdb
+/tools/__pycache__/
+/.tools/
+/sdkconfig
+/sdkconfig.old
+/dependencies.lock
+/managed_components/
+/*.pocket
+/node_modules/

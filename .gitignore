@@ -1,2 +1,19 @@
 # Claude Code project-local settings (machine-specific; never commit)
 .claude/settings.local.json
+
+# Local SDK checkouts, device backups, and build output
+$src/
+note4-build/
+
+# Generated project output and local dependency state
+**/build/
+**/tests/build/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+**/dependencies.lock
+**/*.pocket
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.pdb
