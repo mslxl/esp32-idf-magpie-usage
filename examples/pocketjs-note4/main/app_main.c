@@ -50,7 +50,12 @@ static esp_err_t render_and_present(
         pocketjs_rgb565_abort(renderer, target);
         return ESP_ERR_INVALID_STATE;
     }
+    if (plan.region_count > 8U) {
+        pocketjs_rgb565_abort(renderer, target);
+        return ESP_ERR_INVALID_SIZE;
+    }
     note4_rect_t damage[8];
+    size_t black_pixels = 0U;
     for (uint32_t index = 0; index < plan.region_count; ++index) {
         const pocketjs_rgb565_rect_t region = plan.regions[index];
         if (region.x >= NOTE4_WIDTH || region.y >= NOTE4_HEIGHT ||
@@ -70,6 +75,17 @@ static esp_err_t render_and_present(
             return err;
         }
     }
+    for (size_t pixel = 0; pixel < NOTE4_WIDTH * NOTE4_HEIGHT; ++pixel) {
+        const uint16_t value = rgb565_frame[pixel];
+        const unsigned red = ((value >> 11) & 31U) * 255U / 31U;
+        const unsigned green = ((value >> 5) & 63U) * 255U / 63U;
+        const unsigned blue = (value & 31U) * 255U / 31U;
+        const unsigned luminance = (77U * red + 150U * green + 29U * blue + 128U) >> 8;
+        if (luminance < 128U) ++black_pixels;
+    }
+    ESP_LOGI(TAG, "frame plan: regions=%u full=%d black_pixels=%u/%u",
+             (unsigned)plan.region_count, plan.full_redraw,
+             (unsigned)black_pixels, NOTE4_WIDTH * NOTE4_HEIGHT);
 
     const note4_rect_t gray_regions[] = {{120, 90, 160, 120}};
     note4_present_mode_t mode;
