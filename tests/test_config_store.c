@@ -1,15 +1,15 @@
-#include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "config_store.h"
 #include "nvs.h"
 
-typedef struct { char key[16]; uint8_t durable[NOTE4_SETTINGS_MAX_BYTES], pending[NOTE4_SETTINGS_MAX_BYTES]; size_t durable_length, pending_length; } entry_t;
-static entry_t entries[8];
+typedef struct { char key[16]; uint8_t durable[NOTE4_SETTINGS_MAX_BYTES], pending[NOTE4_SETTINGS_MAX_BYTES]; size_t durable_length, pending_length; bool erased; } entry_t;
+static entry_t entries[16];
 static size_t entry_count;
 static entry_t *lookup(const char *key) {
     for (size_t i = 0U; i < entry_count; ++i) if (!strcmp(entries[i].key, key)) return &entries[i];
-    if (entry_count == 8U || strlen(key) >= sizeof(entries[0].key)) abort();
+    if (entry_count == sizeof(entries) / sizeof(entries[0]) || strlen(key) >= sizeof(entries[0].key)) exit(1);
     entry_t *entry = &entries[entry_count++]; memcpy(entry->key, key, strlen(key) + 1U); return entry;
 }
 static esp_err_t init_error, write_error, commit_error;
@@ -24,9 +24,9 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *data, size_t 
     (void)handle;
     entry_t *entry = lookup(key);
     if (entry->durable_length == 0U) return ESP_ERR_NVS_NOT_FOUND;
-    if (*size < entry->durable_length) return ESP_ERR_NVS_INVALID_LENGTH;
+    if (data && *size < entry->durable_length) return ESP_ERR_NVS_INVALID_LENGTH;
     *size = entry->durable_length;
-    memcpy(data, entry->durable, entry->durable_length);
+    if (data) memcpy(data, entry->durable, entry->durable_length);
     return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, size_t size) {
@@ -41,19 +41,21 @@ esp_err_t nvs_commit(nvs_handle_t handle) {
     (void)handle;
     for (size_t i = 0U; i < entry_count; ++i) {
         entry_t *entry = &entries[i];
+        if (!commit_error && entry->erased) entry->durable_length = 0U;
         if (!commit_error && entry->pending_length) {
             memcpy(entry->durable, entry->pending, entry->pending_length);
             entry->durable_length = entry->pending_length;
         }
         entry->pending_length = 0U;
+        entry->erased = false;
     }
     return commit_error;
 }
 esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key) {
-    (void)handle; (void)key; ++erases; return ESP_OK;
+    (void)handle; lookup(key)->erased = true; return ESP_OK;
 }
 
-#define CHECK(condition) do { if (!(condition)) abort(); } while (0)
+#define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "failed %d: %s\n", __LINE__, #condition); exit(1); } } while (0)
 int main(void) {
     init_error = ESP_ERR_NVS_NO_FREE_PAGES;
     CHECK(note4_config_store_init() == ESP_ERR_NVS_NO_FREE_PAGES);

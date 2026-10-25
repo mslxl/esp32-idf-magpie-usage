@@ -84,13 +84,27 @@ static uint32_t crc32(const uint8_t *bytes, size_t length) {
     }
     return ~crc;
 }
+#define BUNDLE_UNDO 36U
 static esp_err_t head(uint8_t manifest[BUNDLE_MANIFEST], bool *found) {
-    size_t size = BUNDLE_MANIFEST;
-    const esp_err_t err = nvs_get_blob(s_handle, "bundle_head", manifest, &size);
-    *found = err == ESP_OK;
-    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
-    if (err != ESP_OK) return err;
-    if (size != BUNDLE_MANIFEST || memcmp(manifest, "N4B3", 4U) || manifest[4] > 1U ||
+    uint8_t undo[BUNDLE_UNDO];
+    size_t size = sizeof(undo);
+    esp_err_t err = nvs_get_blob(s_handle, "bundle_undo", undo, &size);
+    *found = false;
+    if (err == ESP_OK) {
+        if (size != sizeof(undo) || memcmp(undo, "N4U1", 4U) || undo[4] > 1U ||
+            undo[5] || undo[6] || undo[7] || crc32(undo, 32U) != get32(undo + 32U)) return ESP_ERR_INVALID_STATE;
+        *found = undo[4] != 0U;
+        if (!*found) return ESP_OK;
+        memcpy(manifest, undo + 8U, BUNDLE_MANIFEST);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        size = BUNDLE_MANIFEST;
+        err = nvs_get_blob(s_handle, "bundle_head", manifest, &size);
+        if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+        if (err != ESP_OK) return err;
+        if (size != BUNDLE_MANIFEST) return ESP_ERR_INVALID_STATE;
+        *found = true;
+    } else return err;
+    if (memcmp(manifest, "N4B3", 4U) || manifest[4] > 1U ||
         manifest[5] || manifest[6] || manifest[7] || crc32(manifest, 20U) != get32(manifest + 20U)) return ESP_ERR_INVALID_STATE;
     return ESP_OK;
 }
@@ -150,6 +164,21 @@ esp_err_t note4_config_store_save_bundle(const note4_settings_t *config, const u
         if (err == ESP_OK && previous_size != sizeof(previous)) err = ESP_ERR_INVALID_STATE;
     }
     if (err != ESP_OK) { memset(&blob, 0, sizeof(blob)); return err; }
+    uint8_t undo[BUNDLE_UNDO] = {'N', '4', 'U', '1', present ? 1U : 0U};
+    if (present) memcpy(undo + 8U, previous, sizeof(previous));
+    put32(undo + 32U, crc32(undo, 32U));
+    size_t pending_size = 0U;
+    err = nvs_get_blob(s_handle, "bundle_undo", NULL, &pending_size);
+    if (err == ESP_OK) {
+        /* Finish an interrupted rollback before reusing either bank. */
+        err = present ? nvs_set_blob(s_handle, "bundle_head", previous, sizeof(previous))
+            : nvs_erase_key(s_handle, "bundle_head");
+        if (err == ESP_ERR_NVS_NOT_FOUND && !present) err = ESP_OK;
+        if (err == ESP_OK) err = nvs_commit(s_handle);
+        if (err == ESP_OK) err = nvs_erase_key(s_handle, "bundle_undo");
+        if (err == ESP_OK) err = nvs_commit(s_handle);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    if (err != ESP_OK) { memset(&blob, 0, sizeof(blob)); return err; }
     const uint8_t bank = present ? (uint8_t)(1U - previous[4]) : 0U;
     const size_t total = blob.length + length;
     uint8_t *bytes = malloc(total);
@@ -184,17 +213,26 @@ esp_err_t note4_config_store_save_bundle(const note4_settings_t *config, const u
     memset(bytes, 0, total); free(bytes);
     if (err != ESP_OK) return err;
     err = nvs_commit(s_handle); if (err != ESP_OK) return err;
-    /* The active bank is untouched until every candidate chunk is durable. */
+    /* A durable undo pointer keeps failed or interrupted publication on the old bank. */
+    err = nvs_set_blob(s_handle, "bundle_undo", undo, sizeof(undo));
+    if (err == ESP_OK) err = nvs_commit(s_handle);
+    if (err != ESP_OK) return err;
     err = nvs_set_blob(s_handle, "bundle_head", manifest, sizeof(manifest));
     if (err == ESP_OK) err = nvs_commit(s_handle);
-    if (err == ESP_OK) return ESP_OK;
-    /* NVS writes may be visible before commit. Restore the last complete pointer
-     * on a reported failure; candidate chunks never overwrite the active bank. */
+    if (err == ESP_OK) {
+        err = nvs_erase_key(s_handle, "bundle_undo");
+        if (err == ESP_OK) err = nvs_commit(s_handle);
+        if (err == ESP_OK) return ESP_OK;
+    }
+    /* Erasing the undo record may be visible even when its commit fails. Re-arm
+     * it before restoring the head, so either successful write preserves the old bank. */
+    esp_err_t guarded = nvs_set_blob(s_handle, "bundle_undo", undo, sizeof(undo));
+    if (guarded == ESP_OK) guarded = nvs_commit(s_handle);
     esp_err_t restored = present ? nvs_set_blob(s_handle, "bundle_head", previous, sizeof(previous))
         : nvs_erase_key(s_handle, "bundle_head");
     if (restored == ESP_ERR_NVS_NOT_FOUND && !present) restored = ESP_OK;
     if (restored == ESP_OK) restored = nvs_commit(s_handle);
-    if (restored != ESP_OK) {
+    if (restored != ESP_OK && guarded != ESP_OK) {
         ESP_LOGE(TAG, "could not restore settings manifest after failed save");
         return ESP_ERR_INVALID_STATE;
     }
@@ -226,6 +264,8 @@ esp_err_t note4_config_store_clear(void) {
         }
     }
     err = nvs_erase_key(s_handle, "bundle_head");
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;
+    err = nvs_erase_key(s_handle, "bundle_undo");
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;
     err = nvs_erase_key(s_handle, "web_settings_v2");
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;

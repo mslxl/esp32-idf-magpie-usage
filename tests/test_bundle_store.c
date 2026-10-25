@@ -6,7 +6,25 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "failed %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 typedef struct { char key[16]; uint8_t *data, *pending; size_t length, pending_length; bool erased; } entry_t;
 static entry_t entries[256]; static size_t count; static int writes, commits, fail_write, fail_commit;
-static bool immediate;
+static bool immediate, powered_off;
+static int cut_after, operations;
+static esp_err_t checkpoint(void) {
+    if (++operations == cut_after) powered_off = true;
+    return powered_off ? ESP_FAIL : ESP_OK;
+}
+static void reboot(void) {
+    for (size_t i = 0; i < count; ++i) {
+        free(entries[i].pending); entries[i].pending = NULL; entries[i].erased = false;
+    }
+    powered_off = false; cut_after = 0;
+    CHECK(note4_config_store_init() == ESP_OK);
+}
+static void reset(void) {
+    for (size_t i = 0; i < count; ++i) { free(entries[i].data); free(entries[i].pending); }
+    memset(entries, 0, sizeof(entries)); count = 0;
+    writes = commits = fail_write = fail_commit = operations = cut_after = 0;
+    powered_off = false;
+}
 static entry_t *entry(const char *key) {
     for (size_t i = 0; i < count; ++i) if (!strcmp(entries[i].key, key)) return &entries[i];
     CHECK(count < 256 && strlen(key) < 16); entry_t *e = &entries[count++]; memcpy(e->key, key, strlen(key) + 1); return e;
@@ -14,31 +32,36 @@ static entry_t *entry(const char *key) {
 esp_err_t nvs_flash_init(void) { return ESP_OK; }
 esp_err_t nvs_open(const char *name, int mode, nvs_handle_t *handle) { (void)name; (void)mode; *handle = 1; return ESP_OK; }
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *data, size_t *size) {
-    (void)handle; entry_t *e = entry(key); if (!e->data) return ESP_ERR_NVS_NOT_FOUND;
+    (void)handle; if (powered_off) return ESP_FAIL;
+    entry_t *e = entry(key); if (!e->data) return ESP_ERR_NVS_NOT_FOUND;
     if (data && *size < e->length) return ESP_ERR_NVS_INVALID_LENGTH;
     *size = e->length; if (data) memcpy(data, e->data, e->length); return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, size_t size) {
-    (void)handle; if (++writes == fail_write) return ESP_ERR_NO_MEM;
+    (void)handle; if (powered_off) return ESP_FAIL;
+    if (++writes == fail_write) return ESP_ERR_NO_MEM;
     entry_t *e = entry(key);
-    if (immediate) { uint8_t *copy = malloc(size); CHECK(copy); memcpy(copy, data, size); free(e->data); e->data = copy; e->length = size; return ESP_OK; }
-    free(e->pending); e->pending = malloc(size); CHECK(e->pending); memcpy(e->pending, data, size); e->pending_length = size; return ESP_OK;
+    if (immediate) { uint8_t *copy = malloc(size); CHECK(copy); memcpy(copy, data, size); free(e->data); e->data = copy; e->length = size; return checkpoint(); }
+    free(e->pending); e->pending = malloc(size); CHECK(e->pending); memcpy(e->pending, data, size); e->pending_length = size; return checkpoint();
 }
 esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key) {
-    (void)handle; entry_t *e = entry(key);
+    (void)handle; if (powered_off) return ESP_FAIL;
+    entry_t *e = entry(key);
     if (immediate) { free(e->data); e->data = NULL; e->length = 0; }
     else e->erased = true;
-    return ESP_OK;
+    return checkpoint();
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
-    (void)handle; const bool failed = ++commits == fail_commit;
+    (void)handle; if (powered_off) return ESP_FAIL;
+    const bool failed = ++commits == fail_commit;
     for (size_t i = 0; i < count; ++i) {
         entry_t *e = &entries[i];
         if (!failed && e->erased) { free(e->data); e->data = NULL; e->length = 0; }
         if (!failed && e->pending) { free(e->data); e->data = e->pending; e->length = e->pending_length; e->pending = NULL; }
         free(e->pending); e->pending = NULL; e->erased = false;
     }
-    return failed ? ESP_FAIL : ESP_OK;
+    const esp_err_t result = checkpoint();
+    return failed ? ESP_FAIL : result;
 }
 int main(void) {
     CHECK(note4_config_store_init() == ESP_OK);
@@ -53,7 +76,7 @@ int main(void) {
         fail_write = writes + fail;
         const esp_err_t result = note4_config_store_save_bundle(&settings, (const uint8_t *)"new", 3);
         fail_write = 0;
-        if (result == ESP_OK) { /* Only two writes are needed for this small candidate. */
+        if (result == ESP_OK) { /* Fault positions beyond this save do not fire. */
             settings.web.interval_seconds = 30; CHECK(note4_config_store_save_bundle(&settings, prefs, 9000) == ESP_OK);
         }
         CHECK(note4_config_store_load_bundle(&loaded, &found, &received, &length) == ESP_OK && found);
@@ -77,11 +100,21 @@ int main(void) {
         CHECK(loaded.web.interval_seconds == 60 && length == 9000 && !memcmp(received, prefs, length));
         free(received); received = NULL;
     }
-    settings.web.interval_seconds = 600; fail_commit = commits + 2;
-    CHECK(note4_config_store_save_bundle(&settings, (const uint8_t *)"new", 3) != ESP_OK); fail_commit = 0;
-    CHECK(note4_config_store_load_bundle(&loaded, &found, &received, &length) == ESP_OK && found);
-    CHECK(loaded.web.interval_seconds == 60 && length == 9000);
-    free(received); received = NULL;
+    for (int recovery_write = 4; recovery_write <= 5; ++recovery_write) {
+        for (int publication_commit = 3; publication_commit <= 4; ++publication_commit) {
+            /* Begin with no pending rollback so faults reach the publication phase. */
+            settings.web.interval_seconds = 60;
+            CHECK(note4_config_store_save_bundle(&settings, prefs, 9000) == ESP_OK);
+            settings.web.interval_seconds = 600;
+            fail_commit = commits + publication_commit;
+            fail_write = writes + recovery_write;
+            CHECK(note4_config_store_save_bundle(&settings, (const uint8_t *)"new", 3) != ESP_OK);
+            fail_commit = 0; fail_write = 0;
+            CHECK(note4_config_store_load_bundle(&loaded, &found, &received, &length) == ESP_OK && found);
+            CHECK(loaded.web.interval_seconds == 60 && length == 9000 && !memcmp(received, prefs, length));
+            free(received); received = NULL;
+        }
+    }
     settings.web.interval_seconds = 90;
     CHECK(note4_config_store_save_bundle(&settings, (const uint8_t *)"small", 5) == ESP_OK);
     CHECK(note4_config_store_save_bundle(&settings, (const uint8_t *)"small", 5) == ESP_OK);
@@ -102,7 +135,27 @@ int main(void) {
     CHECK(note4_config_store_clear() == ESP_OK);
     CHECK(note4_config_store_load_bundle(&loaded, &found, &received, &length) == ESP_OK && !found);
     for (size_t i = 0; i < count; ++i) if (entries[i].key[0] == 'b') CHECK(entries[i].data == NULL);
-    free(prefs);
-    for (size_t i = 0; i < count; ++i) { free(entries[i].data); free(entries[i].pending); }
+    for (int visibility = 0; visibility <= 1; ++visibility) {
+        for (int cut = 1; cut <= 14; ++cut) {
+            reset(); immediate = visibility != 0;
+            note4_settings_clear(&settings);
+            CHECK(note4_config_store_save_bundle(&settings, prefs, 9000) == ESP_OK);
+            operations = 0; cut_after = cut;
+            settings.web.interval_seconds = 600;
+            (void)note4_config_store_save_bundle(&settings, (const uint8_t *)"new", 3);
+            reboot();
+            CHECK(note4_config_store_load_bundle(&loaded, &found, &received, &length) == ESP_OK && found);
+            CHECK((loaded.web.interval_seconds == 30 && length == 9000 && !memcmp(received, prefs, length)) ||
+                (loaded.web.interval_seconds == 600 && length == 3 && !memcmp(received, "new", length)));
+            free(received); received = NULL;
+            settings.web.interval_seconds = 120;
+            CHECK(note4_config_store_save_bundle(&settings, (const uint8_t *)"recovered", 9) == ESP_OK);
+            reboot();
+            CHECK(note4_config_store_load_bundle(&loaded, &found, &received, &length) == ESP_OK && found);
+            CHECK(loaded.web.interval_seconds == 120 && length == 9 && !memcmp(received, "recovered", length));
+            free(received); received = NULL;
+        }
+    }
+    free(prefs); reset();
     puts("immutable settings/prefs generations preserve previous complete commit on failures"); return 0;
 }
