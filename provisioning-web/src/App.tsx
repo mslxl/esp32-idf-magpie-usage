@@ -1,9 +1,10 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Index, Show, createSignal } from "solid-js";
 import {
   decodeStatusPayload,
   Opcode,
   PasswordMode,
   encodeSetSlotPayload,
+  MAX_SLOTS,
   type DeviceStatus,
   type PasswordModeValue,
 } from "./protocol";
@@ -27,7 +28,8 @@ export default function App() {
   const [connected, setConnected] = createSignal(false);
   const [deviceName, setDeviceName] = createSignal("");
   const [message, setMessage] = createSignal("请先连接 Magpie Usage");
-  const [slots, setSlots] = createSignal<Slot[]>(Array.from({ length: 5 }, emptySlot));
+  const [slots, setSlots] = createSignal<Slot[]>(Array.from({ length: MAX_SLOTS }, emptySlot));
+  const [visibleSlots, setVisibleSlots] = createSignal(1);
   const [scans, setScans] = createSignal<Scan[]>([]);
   const [applying, setApplying] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
@@ -97,7 +99,26 @@ export default function App() {
     }
   });
 
+  const canAddSlot = () => visibleSlots() < MAX_SLOTS &&
+    slots().slice(0, visibleSlots()).every((slot) => {
+      if (!slot.ssid) return false;
+      try {
+        encodeSetSlotPayload(slot);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+  function addSlot(): void {
+    if (!busy() && !applying() && editing() && canAddSlot()) {
+      setVisibleSlots((count) => count + 1);
+    }
+  }
+
   function applyStatus(status: DeviceStatus): void {
+    const lastConfigured = status.slots.reduce((last, slot, index) => slot.ssid ? index : last, -1);
+    setVisibleSlots(Math.max(1, lastConfigured + 1));
     setSlots(status.slots.map((slot) => ({
       ssid: slot.ssid,
       password: "",
@@ -213,45 +234,49 @@ export default function App() {
       <Show when={connected()}>
         <button disabled={busy() || applying() || !editing()} onClick={scan}>扫描 Wi‑Fi</button>
         <fieldset disabled={busy() || applying() || !editing()}>
-        <For each={slots()}>{(slot, index) => (
+        <Index each={slots().slice(0, visibleSlots())}>{(slot, index) => (
           <section class="slot">
-            <h2>网络 {index() + 1}</h2>
-            <select value={slot.ssid} onChange={(event) => updateSsid(index(), event.currentTarget.value)}>
-              <option value="">选择扫描到的 SSID</option>
-              <For each={scans()}>{(network) => <option value={network.ssid}>{network.ssid} ({network.rssi} dBm)</option>}</For>
-            </select>
+            <h2>网络 {index + 1}</h2>
+            <datalist id={`wifi-scan-results-${index}`}>
+              <For each={scans()}>{(network) => <option value={network.ssid}>{network.rssi} dBm</option>}</For>
+            </datalist>
             <input
               type="text"
-              placeholder="SSID（也可手动输入）"
-              value={slot.ssid}
-              onInput={(event) => updateSsid(index(), event.currentTarget.value)}
+              list={`wifi-scan-results-${index}`}
+              aria-label={`网络 ${index + 1} SSID`}
+              placeholder="选择扫描到的网络或输入 SSID"
+              value={slot().ssid}
+              onInput={(event) => updateSsid(index, event.currentTarget.value)}
             />
-            <Show when={slot.ssid}>
+            <Show when={slot().ssid}>
               <label>
                 密码处理
                 <select
-                  value={String(slot.passwordMode)}
-                  onChange={(event) => updateSlot(index(), { passwordMode: Number(event.currentTarget.value) as PasswordModeValue, password: "" })}
+                  value={String(slot().passwordMode)}
+                  onChange={(event) => updateSlot(index, { passwordMode: Number(event.currentTarget.value) as PasswordModeValue, password: "" })}
                 >
-                  <option value={PasswordMode.Unchanged} disabled={!slot.passwordPresent}>保持设备中的密码</option>
+                  <option value={PasswordMode.Unchanged} disabled={!slot().passwordPresent}>保持设备中的密码</option>
                   <option value={PasswordMode.Set}>设置新密码</option>
                   <option value={PasswordMode.Clear}>清除密码（开放网络）</option>
                 </select>
               </label>
-              <Show when={slot.passwordMode === PasswordMode.Set}>
+              <Show when={slot().passwordMode === PasswordMode.Set}>
                 <input
                   type="password"
                   placeholder="输入新密码"
-                  value={slot.password}
-                  onInput={(event) => updateSlot(index(), { password: event.currentTarget.value })}
+                  value={slot().password}
+                  onInput={(event) => updateSlot(index, { password: event.currentTarget.value })}
                 />
               </Show>
-              <Show when={slot.passwordMode === PasswordMode.Unchanged && slot.passwordPresent}>
+              <Show when={slot().passwordMode === PasswordMode.Unchanged && slot().passwordPresent}>
                 <small>设备已有密码，网页不会显示密码内容。</small>
               </Show>
             </Show>
           </section>
-        )}</For>
+        )}</Index>
+        <Show when={canAddSlot()}>
+          <button type="button" class="add-slot" aria-label="添加 Wi-Fi" onClick={addSlot}>+</button>
+        </Show>
         </fieldset>
         <button disabled={busy() || applying() || !editing()} onClick={commit}>{applying() ? "应用中…" : "确认并应用"}</button>
         <button disabled={busy() || applying() || !editing()} onClick={abort}>放弃修改</button>

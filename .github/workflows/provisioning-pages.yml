@@ -1,0 +1,57 @@
+name: Deploy provisioning page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "provisioning-web/**"
+      - ".github/workflows/provisioning-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provisioning-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - name: Install dependencies
+        working-directory: provisioning-web
+        run: bun install --frozen-lockfile
+      - name: Test
+        working-directory: provisioning-web
+        run: bun run test
+      - name: Build
+        working-directory: provisioning-web
+        run: bun run build
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: provisioning-web/dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

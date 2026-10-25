@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: "./",
-  plugins: [solid()],
-});
+  plugins: [solid({ hot: mode !== "test" })],
+}));
