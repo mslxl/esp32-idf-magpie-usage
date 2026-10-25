@@ -25,6 +25,8 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
   let hidden: string[] = [];
   let ranks: number[] = [];
   let cardFailure = false;
+  let textFailure = false;
+  let materialized: boolean | undefined;
   const detach = (id: number) => { for (const node of nodes.values()) node.children = node.children.filter(child => child !== id); };
   const destroy = (id: number) => {
     for (const child of nodes.get(id)?.children ?? []) destroy(child);
@@ -45,7 +47,10 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
       const node = nodes.get(id)!; node.style ??= {};
       const name = Object.entries(PROP).find(([, code]) => code === property)?.[0] ?? String(property);
       node.style[name] = value;
-    }, setText: (id: number, text: string) => { nodes.get(id)!.text = text; },
+    }, setText: (id: number, text: string) => {
+      if (textFailure) { textFailure = false; throw new Error("synthetic UI allocation failure"); }
+      nodes.get(id)!.text = text;
+    },
     replaceText: (id: number, text: string) => { nodes.get(id)!.text = text; },
     uploadTexture: () => 0, setImage: noop, setSprite: noop, animate: () => 1, cancelAnim: noop,
     setFocus: noop, measureText: measure,
@@ -55,7 +60,7 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
   let clock = initialTime;
   class DeviceDate extends Date { static now() { return clock; } }
   const context = createContext({ ui, console, Date: DeviceDate, __pak: pack.buffer.slice(pack.byteOffset, pack.byteOffset + pack.byteLength),
-    note4: { get status() { return { ...status }; }, quotas: { info: () => ({ version, available, count: cards.length }), card: (i: number) => { if (cardFailure) throw new Error("synthetic allocation failure"); return cards[i]; }, visible: (i: number) => !hidden.includes(cards[i].provider), rank: (i: number) => ranks[i] ?? 0 },
+    note4: { get status() { return { ...status }; }, quotas: { materialized: (accepted: boolean) => { materialized = accepted; }, info: () => ({ version, available, count: cards.length }), card: (i: number) => { if (cardFailure) throw new Error("synthetic allocation failure"); return cards[i]; }, visible: (i: number) => !hidden.includes(cards[i].provider), rank: (i: number) => ranks[i] ?? 0 },
       ble: { name: "test", requestAction: noop }, display: { setMode: noop } } });
   runInContext(readFileSync(new URL("../.pocket-build/package/note4-hello.js", import.meta.url), "utf8"), context);
   const frame = (buttons = 0) => runInContext(`frame(${buttons}, 0)`, context);
@@ -67,9 +72,12 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
     return [{ ...node, style }, ...node.children.flatMap(child => styledNodes(child, style))];
   };
   return { frame, text: () => textAt(1).filter(Boolean), status, nodes: styledNodes, measure,
+    materialized: () => materialized,
     hide(providers: string[]) { hidden = providers; ++version; frame(); },
     advance(milliseconds: number) { clock += milliseconds; frame(); },
     update(next: QuotaCard[], nextRanks: number[] = []) { cards = next; ranks = nextRanks; ++version; frame(); },
+    settle(accepted: boolean) { runInContext(`note4.quotas.settle(${accepted})`, context); },
+    failNextText() { textFailure = true; },
     failCards(value: boolean) { cardFailure = value; ++version; frame(); },
     unavailable() { available = false; ++version; frame(); } };
 }
@@ -96,6 +104,32 @@ test("candidate materialization failure retains the visible page and can recover
   app.update([card("Claude")]);
   expect(app.text()).toContain("Claude");
   expect(app.text()).not.toContain("Codex");
+});
+
+test("a rejected presented candidate restores the previous complete page", () => {
+  const app = device([card("Codex")]);
+  app.settle(true);
+  const previous = app.text();
+  app.update([card("Claude")]);
+  expect(app.text()).toContain("Claude");
+  app.settle(false);
+  expect(app.text()).toEqual(previous);
+  app.update([card("DeepSeek")]);
+  app.settle(true);
+  expect(app.text()).toContain("DeepSeek");
+});
+
+test("a rejected UI mutation can restore the complete previous page", () => {
+  const app = device([card("Codex")]);
+  app.settle(true);
+  const previous = app.text();
+  app.failNextText();
+  app.update([card("Claude")]);
+  expect(app.materialized()).toBe(false);
+  app.settle(false);
+  expect(app.text()).toEqual(previous);
+  app.update([card("DeepSeek")]);
+  expect(app.text()).toContain("DeepSeek");
 });
 
 test("product package includes a real 15px font atlas for adaptive layout", () => {

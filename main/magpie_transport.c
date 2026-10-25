@@ -1,4 +1,6 @@
 #include "magpie_transport.h"
+#include "resource_budget.h"
+#include "mbedtls/ssl.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -47,7 +49,7 @@ static int transport_open(void *context, const char *host, unsigned port, bool s
     if (transport->connected) return 1;
     if (transport->dns == NULL) {
         dns_request_t *request = calloc(1U, sizeof(*request));
-        if (request == NULL) return -1;
+        if (request == NULL) return -4;
         atomic_init(&request->references, 2U);
         atomic_init(&request->state, 0);
         memcpy(request->hostname, host, strlen(host) + 1U);
@@ -66,8 +68,10 @@ static int transport_open(void *context, const char *host, unsigned port, bool s
     char numeric[IPADDR_STRLEN_MAX];
     if (ipaddr_ntoa_r(&request->address, numeric, sizeof(numeric)) == NULL) return -1;
     if (transport->tls == NULL) {
+        note4_resource_log("tls-start", 0U);
+        if (!note4_resource_available(32768U)) return -4;
         transport->tls = esp_tls_init();
-        if (transport->tls == NULL) return -1;
+        if (transport->tls == NULL) return -4;
         transport->config = (esp_tls_cfg_t){.non_block = true, .timeout_ms = 20,
             .is_plain_tcp = !secure, .crt_bundle_attach = secure ? esp_crt_bundle_attach : NULL,
             .common_name = transport->hostname};
@@ -80,12 +84,14 @@ static int transport_open(void *context, const char *host, unsigned port, bool s
         const int flags = fcntl(socket, F_GETFL, 0);
         if (flags < 0 || fcntl(socket, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
         transport->connected = true;
+        note4_resource_log("tls-connected", 0U);
     } else if (rc < 0 && secure) {
         esp_tls_error_handle_t handle;
         int code = 0, flags = 0;
         if (esp_tls_get_error_handle(transport->tls, &handle) == ESP_OK) {
-            (void)esp_tls_get_and_clear_last_error(handle, &code, &flags);
+            const esp_err_t error = esp_tls_get_and_clear_last_error(handle, &code, &flags);
             if (flags != 0) return -3;
+            if (error == ESP_ERR_NO_MEM || code == MBEDTLS_ERR_SSL_ALLOC_FAILED) return -4;
         }
     }
     return rc;
@@ -94,13 +100,16 @@ static int transport_open(void *context, const char *host, unsigned port, bool s
 static int translate(ssize_t result) {
     if (result == ESP_TLS_ERR_SSL_WANT_READ || result == ESP_TLS_ERR_SSL_WANT_WRITE ||
         (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) return -2;
+    if (result == MBEDTLS_ERR_SSL_ALLOC_FAILED || (result < 0 && errno == ENOMEM)) return -4;
     return (int)result;
 }
 
 static int transport_write(void *context, const void *bytes, size_t length) {
+    errno = 0;
     return translate(esp_tls_conn_write(((note4_magpie_transport_t *)context)->tls, bytes, length));
 }
 static int transport_read(void *context, void *bytes, size_t length) {
+    errno = 0;
     return translate(esp_tls_conn_read(((note4_magpie_transport_t *)context)->tls, bytes, length));
 }
 static void transport_close(void *context) {

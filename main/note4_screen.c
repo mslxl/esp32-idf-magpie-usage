@@ -18,6 +18,9 @@
 #include "zectrix_epd.h"
 #include "note4_presenter.h"
 #include "ble_provisioning.h"
+#include "magpie_worker.h"
+#include "resource_budget.h"
+#include "esp_timer.h"
 
 static const char *TAG = "note4_screen";
 static QueueHandle_t s_snapshots;
@@ -27,6 +30,17 @@ static note4_quota_snapshot_t *s_pending_quotas;
 static bool s_quotas_changed;
 static note4_quota_snapshot_t *s_quotas;
 static uint32_t s_quota_version;
+static unsigned s_pending_epoch;
+static note4_screen_quota_handler_t s_pending_handler;
+static void *s_pending_context;
+static int s_materialized;
+
+static JSValue quota_materialized(JSContext *context, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    if (argc != 1) return JS_ThrowTypeError(context, "Expected publication result");
+    s_materialized = JS_ToBool(context, argv[0]) ? 1 : -1;
+    return JS_UNDEFINED;
+}
 static note4_display_prefs_t *s_pending_prefs, *s_prefs;
 static bool s_prefs_changed;
 static note4_screen_action_handler_t s_action_handler;
@@ -90,12 +104,23 @@ static JSValue set_display_mode(JSContext *context, JSValueConst self,
     return JS_UNDEFINED;
 }
 
+/* QuickJS setters consume their value, including on failure. Never install an
+ * exception sentinel as a property when the value allocation itself failed. */
+static int surface_set_property(JSContext *context, JSValueConst object, const char *name, JSValue value) {
+    if (JS_IsException(value)) return -1;
+    if (JS_IsException(object)) { JS_FreeValue(context, value); return -1; }
+    return JS_SetPropertyStr(context, object, name, value);
+}
+
 static JSValue quota_info(JSContext *context, JSValueConst self, int argc, JSValueConst *argv) {
     (void)self; (void)argc; (void)argv;
     JSValue info = JS_NewObject(context);
-    JS_SetPropertyStr(context, info, "available", JS_NewBool(context, s_quotas != NULL));
-    JS_SetPropertyStr(context, info, "version", JS_NewUint32(context, s_quota_version));
-    JS_SetPropertyStr(context, info, "count", JS_NewFloat64(context, (double)note4_quota_count(s_quotas)));
+    if (JS_IsException(info)) return info;
+    if (surface_set_property(context, info, "available", JS_NewBool(context, s_quotas != NULL)) < 0 ||
+        surface_set_property(context, info, "version", JS_NewUint32(context, s_quota_version)) < 0 ||
+        surface_set_property(context, info, "count", JS_NewFloat64(context, (double)note4_quota_count(s_quotas))) < 0) {
+        JS_FreeValue(context, info); return JS_EXCEPTION;
+    }
     return info;
 }
 
@@ -135,21 +160,24 @@ static JSValue quota_card(JSContext *context, JSValueConst self, int argc, JSVal
     static const char *const fields[] = {"provider", "user", "name", "alias", "seat", "from", "kind",
         "plan", "balance", "error", "renew", "asOf", "readAt", "until", "lastServedAt"};
     JSValue card = JS_NewObject(context);
+    if (JS_IsException(card)) return card;
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
         const char *value = note4_quota_text(s_quotas, (size_t)index, fields[i]);
         if (strcmp(fields[i], "error") == 0 && value[0]) value = "Provider reading failed";
-        if (JS_SetPropertyStr(context, card, fields[i], JS_NewString(context, value)) < 0) goto fail;
+        if (surface_set_property(context, card, fields[i], JS_NewString(context, value)) < 0) goto fail;
     }
-    if (JS_SetPropertyStr(context, card, "readDeferred", JS_NewBool(context,
+    if (surface_set_property(context, card, "readDeferred", JS_NewBool(context,
             note4_quota_flag(s_quotas, (size_t)index, "readDeferred"))) < 0) goto fail;
     JSValue windows = JS_NewArray(context);
+    if (JS_IsException(windows)) goto fail;
     const size_t length = note4_quota_window_count(s_quotas, (size_t)index);
     for (size_t w = 0; w < length; ++w) {
         static const char *const names[] = {"name", "display", "unit", "pool", "holdsWhy", "used", "remaining",
             "amount", "limit", "resetSecs", "resetsAt", "unlimited"};
         JSValue window = JS_NewObject(context);
+        if (JS_IsException(window)) { JS_FreeValue(context, windows); goto fail; }
         for (size_t f = 0; f < sizeof(names) / sizeof(names[0]); ++f) {
-            if (JS_SetPropertyStr(context, window, names[f], JS_NewString(context,
+            if (surface_set_property(context, window, names[f], JS_NewString(context,
                     note4_quota_window_text(s_quotas, (size_t)index, w, names[f]))) < 0) {
                 JS_FreeValue(context, window); JS_FreeValue(context, windows); goto fail;
             }
@@ -158,26 +186,28 @@ static JSValue quota_card(JSContext *context, JSValueConst self, int argc, JSVal
             JS_FreeValue(context, windows); goto fail;
         }
     }
-    if (JS_SetPropertyStr(context, card, "windows", windows) < 0) goto fail;
+    if (surface_set_property(context, card, "windows", windows) < 0) goto fail;
     JSValue balance = JS_NewArray(context);
+    if (JS_IsException(balance)) goto fail;
     for (size_t b = 0; b < note4_quota_balance_count(s_quotas, (size_t)index); ++b) {
         static const char *const names[] = {"label", "text", "percent"};
         JSValue part = JS_NewObject(context);
+        if (JS_IsException(part)) { JS_FreeValue(context, balance); goto fail; }
         for (size_t f = 0; f < 3U; ++f) {
-            if (JS_SetPropertyStr(context, part, names[f], JS_NewString(context,
+            if (surface_set_property(context, part, names[f], JS_NewString(context,
                     note4_quota_balance_text(s_quotas, (size_t)index, b, names[f]))) < 0) {
                 JS_FreeValue(context, part); JS_FreeValue(context, balance); goto fail;
             }
         }
         const bool failed = note4_quota_balance_text(s_quotas, (size_t)index, b, "error")[0] != 0;
-        if (JS_SetPropertyStr(context, part, "failed", JS_NewBool(context, failed)) < 0) {
+        if (surface_set_property(context, part, "failed", JS_NewBool(context, failed)) < 0) {
             JS_FreeValue(context, part); JS_FreeValue(context, balance); goto fail;
         }
         if (JS_SetPropertyUint32(context, balance, (uint32_t)b, part) < 0) {
             JS_FreeValue(context, balance); goto fail;
         }
     }
-    if (JS_SetPropertyStr(context, card, "balanceSplit", balance) < 0) goto fail;
+    if (surface_set_property(context, card, "balanceSplit", balance) < 0) goto fail;
     return card;
 fail:
     JS_FreeValue(context, card);
@@ -190,21 +220,22 @@ static esp_err_t install_surface(JSContext *context, void *user_data) {
     JSValue note4 = JS_NewObject(context);
     JSValue ble = JS_NewObject(context);
     JSValue display = JS_NewObject(context);
-    int result = JS_SetPropertyStr(context, note4, "status", JS_NewObject(context));
-    result |= JS_SetPropertyStr(context, ble, "name", JS_NewString(context, note4_ble_provisioning_name()));
-    result |= JS_SetPropertyStr(context, ble, "requestAction",
+    int result = surface_set_property(context, note4, "status", JS_NewObject(context));
+    result |= surface_set_property(context, ble, "name", JS_NewString(context, note4_ble_provisioning_name()));
+    result |= surface_set_property(context, ble, "requestAction",
                                JS_NewCFunction(context, request_action, "requestAction", 1));
-    result |= JS_SetPropertyStr(context, note4, "ble", ble);
-    result |= JS_SetPropertyStr(context, display, "setMode",
+    result |= surface_set_property(context, note4, "ble", ble);
+    result |= surface_set_property(context, display, "setMode",
                                JS_NewCFunction(context, set_display_mode, "setMode", 1));
-    result |= JS_SetPropertyStr(context, note4, "display", display);
+    result |= surface_set_property(context, note4, "display", display);
     JSValue quotas = JS_NewObject(context);
-    result |= JS_SetPropertyStr(context, quotas, "info", JS_NewCFunction(context, quota_info, "info", 0));
-    result |= JS_SetPropertyStr(context, quotas, "card", JS_NewCFunction(context, quota_card, "card", 1));
-    result |= JS_SetPropertyStr(context, quotas, "visible", JS_NewCFunction(context, quota_visible, "visible", 1));
-    result |= JS_SetPropertyStr(context, quotas, "rank", JS_NewCFunction(context, quota_rank, "rank", 1));
-    result |= JS_SetPropertyStr(context, note4, "quotas", quotas);
-    result |= JS_SetPropertyStr(context, global, "note4", note4);
+    result |= surface_set_property(context, quotas, "materialized", JS_NewCFunction(context, quota_materialized, "materialized", 1));
+    result |= surface_set_property(context, quotas, "info", JS_NewCFunction(context, quota_info, "info", 0));
+    result |= surface_set_property(context, quotas, "card", JS_NewCFunction(context, quota_card, "card", 1));
+    result |= surface_set_property(context, quotas, "visible", JS_NewCFunction(context, quota_visible, "visible", 1));
+    result |= surface_set_property(context, quotas, "rank", JS_NewCFunction(context, quota_rank, "rank", 1));
+    result |= surface_set_property(context, note4, "quotas", quotas);
+    result |= surface_set_property(context, global, "note4", note4);
     JS_FreeValue(context, global);
     return result < 0 ? ESP_FAIL : ESP_OK;
 }
@@ -215,24 +246,35 @@ static esp_err_t update_surface(const note4_provisioning_snapshot_t *snapshot) {
     JSValue global = JS_GetGlobalObject(context);
     JSValue note4 = JS_GetPropertyStr(context, global, "note4");
     JSValue status = JS_NewObject(context);
-    int result = JS_SetPropertyStr(context, status, "state", JS_NewString(context, state_name(snapshot->state)));
-    result |= JS_SetPropertyStr(context, status, "slot", JS_NewInt32(context, snapshot->slot));
-    result |= JS_SetPropertyStr(context, status, "round", JS_NewInt32(context, snapshot->round));
-    result |= JS_SetPropertyStr(context, status, "storageError", JS_NewBool(context, snapshot->storage_error));
-    result |= JS_SetPropertyStr(context, status, "pairing", JS_NewBool(context, snapshot->pairing));
-    result |= JS_SetPropertyStr(context, status, "passkey", JS_NewUint32(context, snapshot->passkey));
-    result |= JS_SetPropertyStr(context, status, "magpiePhase", JS_NewInt32(context, snapshot->magpie_phase));
-    result |= JS_SetPropertyStr(context, status, "magpieResult", JS_NewInt32(context, snapshot->magpie_result));
-    result |= JS_SetPropertyStr(context, status, "magpieErrorPage", JS_NewBool(context, snapshot->magpie_error_page));
-    result |= JS_SetPropertyStr(context, status, "magpieReading", JS_NewBool(context, snapshot->magpie_reading));
-    result |= JS_SetPropertyStr(context, status, "magpieRetrySeconds", JS_NewUint32(context, snapshot->magpie_retry_seconds));
-    result |= JS_SetPropertyStr(context, status, "timezone", JS_NewString(context, snapshot->display_timezone));
-    result |= JS_SetPropertyStr(context, status, "layout", JS_NewString(context, snapshot->display_layout ? "B" : "A"));
-    result |= JS_SetPropertyStr(context, status, "adaptiveFont", JS_NewBool(context, snapshot->adaptive_font));
-    result |= JS_SetPropertyStr(context, note4, "status", status);
+    if (JS_IsException(global) || JS_IsException(note4) || JS_IsException(status)) {
+        JS_FreeValue(context, status); JS_FreeValue(context, note4); JS_FreeValue(context, global);
+        JSValue exception = JS_GetException(context);
+        JS_FreeValue(context, exception);
+        return ESP_ERR_NO_MEM;
+    }
+    int result = surface_set_property(context, status, "state", JS_NewString(context, state_name(snapshot->state)));
+    result |= surface_set_property(context, status, "slot", JS_NewInt32(context, snapshot->slot));
+    result |= surface_set_property(context, status, "round", JS_NewInt32(context, snapshot->round));
+    result |= surface_set_property(context, status, "storageError", JS_NewBool(context, snapshot->storage_error));
+    result |= surface_set_property(context, status, "pairing", JS_NewBool(context, snapshot->pairing));
+    result |= surface_set_property(context, status, "passkey", JS_NewUint32(context, snapshot->passkey));
+    result |= surface_set_property(context, status, "magpiePhase", JS_NewInt32(context, snapshot->magpie_phase));
+    result |= surface_set_property(context, status, "magpieResult", JS_NewInt32(context, snapshot->magpie_result));
+    result |= surface_set_property(context, status, "magpieErrorPage", JS_NewBool(context, snapshot->magpie_error_page));
+    result |= surface_set_property(context, status, "magpieReading", JS_NewBool(context, snapshot->magpie_reading));
+    result |= surface_set_property(context, status, "magpieRetrySeconds", JS_NewUint32(context, snapshot->magpie_retry_seconds));
+    result |= surface_set_property(context, status, "timezone", JS_NewString(context, snapshot->display_timezone));
+    result |= surface_set_property(context, status, "layout", JS_NewString(context, snapshot->display_layout ? "B" : "A"));
+    result |= surface_set_property(context, status, "adaptiveFont", JS_NewBool(context, snapshot->adaptive_font));
+    if (result < 0) JS_FreeValue(context, status);
+    else result = surface_set_property(context, note4, "status", status);
     JS_FreeValue(context, note4);
     JS_FreeValue(context, global);
-    return result < 0 ? ESP_FAIL : ESP_OK;
+    if (result < 0) {
+        JSValue exception = JS_GetException(context);
+        JS_FreeValue(context, exception);
+    }
+    return result < 0 ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
 static esp_err_t render_frame(uint32_t buttons) {
@@ -240,6 +282,7 @@ static esp_err_t render_frame(uint32_t buttons) {
     pocketjs_ui_frame_view_t frame = {.struct_size = sizeof(frame)};
     esp_err_t err = pocketjs_ui_turn(s_screen.binding, &input, &frame);
     if (err != ESP_OK) return err;
+    if (s_materialized < 0) return ESP_ERR_NO_MEM;
     pocketjs_rgb565_damage_plan_t plan = {.struct_size = sizeof(plan)};
     err = pocketjs_rgb565_prepare(s_screen.renderer, s_screen.target, &frame, &plan);
     if (err != ESP_OK) return err;
@@ -291,6 +334,25 @@ static esp_err_t render_frame(uint32_t buttons) {
 fail:
     pocketjs_rgb565_abort(s_screen.renderer, s_screen.target);
     return err;
+}
+
+static void settle_page(bool accepted) {
+    JSContext *context = pocketjs_guest_quickjs_context(s_screen.guest);
+    JSValue global = JS_GetGlobalObject(context);
+    JSValue note4 = JS_GetPropertyStr(context, global, "note4");
+    JSValue quotas = JS_GetPropertyStr(context, note4, "quotas");
+    JSValue callback = JS_GetPropertyStr(context, quotas, "settle");
+    if (JS_IsFunction(context, callback)) {
+        JSValue argument = JS_NewBool(context, accepted);
+        JSValue result = JS_Call(context, callback, quotas, 1, &argument);
+        if (JS_IsException(result)) {
+            JSValue exception = JS_GetException(context);
+            JS_FreeValue(context, exception);
+        }
+        JS_FreeValue(context, result);
+    }
+    JS_FreeValue(context, callback); JS_FreeValue(context, quotas);
+    JS_FreeValue(context, note4); JS_FreeValue(context, global);
 }
 
 static esp_err_t create_runtime(void) {
@@ -349,23 +411,29 @@ static void screen_task(void *arg) {
     note4_provisioning_snapshot_t snapshot;
     note4_provisioning_init(&snapshot);
     uint32_t previous_buttons = 0U;
+    bool surface_dirty = true;
+    int64_t next_diagnostic = 0;
     for (;;) {
-        if (xQueueReceive(s_snapshots, &snapshot, 0U) == pdTRUE) {
-            ESP_ERROR_CHECK(update_surface(&snapshot));
-        }
+        if (xQueueReceive(s_snapshots, &snapshot, 0U) == pdTRUE) surface_dirty = true;
+        const esp_err_t surface_error = surface_dirty ? update_surface(&snapshot) : ESP_OK;
+        if (surface_error == ESP_OK) surface_dirty = false;
         portENTER_CRITICAL(&s_quota_lock);
         note4_quota_snapshot_t *next_quotas = s_pending_quotas;
         s_pending_quotas = NULL;
         const bool quotas_changed = s_quotas_changed;
+        const unsigned quota_epoch = s_pending_epoch;
+        note4_screen_quota_handler_t quota_handler = s_pending_handler;
+        void *quota_context = s_pending_context;
+        s_pending_handler = NULL;
         s_quotas_changed = false;
         note4_display_prefs_t *next_prefs = s_pending_prefs; s_pending_prefs = NULL;
         const bool prefs_changed = s_prefs_changed; s_prefs_changed = false;
         portEXIT_CRITICAL(&s_quota_lock);
-        if (quotas_changed) {
-            note4_quota_snapshot_t *previous = s_quotas;
+        note4_quota_snapshot_t *previous_quotas = s_quotas;
+        const bool candidate_current = quota_handler == NULL || note4_magpie_worker_current(quota_epoch);
+        if (quotas_changed && candidate_current) {
             s_quotas = next_quotas;
             ++s_quota_version;
-            note4_quota_snapshot_release(previous);
         }
         if (prefs_changed) {
             note4_display_prefs_t *previous = s_prefs; s_prefs = next_prefs;
@@ -374,7 +442,28 @@ static void screen_task(void *arg) {
         uint32_t buttons = 0U;
         if (previous_buttons == 0U) (void)xQueueReceive(s_buttons, &buttons, 0U);
         previous_buttons = buttons;
-        const esp_err_t err = render_frame(buttons);
+        s_materialized = 0;
+        const esp_err_t err = surface_error == ESP_OK ? render_frame(buttons) : surface_error;
+        if (quotas_changed) {
+            bool accepted = candidate_current && (quota_handler == NULL ||
+                (s_materialized == 1 && err == ESP_OK && note4_magpie_worker_current(quota_epoch)));
+            if (quota_handler != NULL) accepted = quota_handler(next_quotas, quota_epoch, accepted, quota_context);
+            if (!accepted && candidate_current) {
+                s_quotas = previous_quotas; ++s_quota_version;
+                pocketjs_rgb565_target_invalidate(s_screen.target);
+            }
+            settle_page(accepted);
+            note4_quota_snapshot_release(accepted ? previous_quotas : next_quotas);
+        } else settle_page(err == ESP_OK);
+        if (esp_timer_get_time() >= next_diagnostic) {
+            note4_resource_log("screen", 0U);
+            pocketjs_guest_stats_t stats = {.struct_size = sizeof(stats)};
+            if (pocketjs_guest_stats(s_screen.guest, &stats) == ESP_OK)
+                ESP_LOGI(TAG, "guest_heap=%u guest_limit=%u quota_version=%u cards=%u",
+                    (unsigned)stats.heap_used, (unsigned)stats.heap_limit,
+                    (unsigned)s_quota_version, (unsigned)note4_quota_count(s_quotas));
+            next_diagnostic = esp_timer_get_time() + 60000000;
+        }
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "PocketJS render failed: %s", esp_err_to_name(err));
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -401,14 +490,23 @@ esp_err_t note4_screen_render(const note4_provisioning_snapshot_t *snapshot) {
     return xQueueOverwrite(s_snapshots, snapshot) == pdTRUE ? ESP_OK : ESP_FAIL;
 }
 
-void note4_screen_publish_quotas(note4_quota_snapshot_t *snapshot) {
+void note4_screen_stage_quotas(note4_quota_snapshot_t *snapshot, unsigned epoch,
+    note4_screen_quota_handler_t handler, void *context) {
     note4_quota_snapshot_retain(snapshot);
     portENTER_CRITICAL(&s_quota_lock);
     note4_quota_snapshot_t *previous = s_pending_quotas;
-    s_pending_quotas = snapshot;
+    note4_screen_quota_handler_t previous_handler = s_pending_handler;
+    void *previous_context = s_pending_context;
+    const unsigned previous_epoch = s_pending_epoch;
+    s_pending_quotas = snapshot; s_pending_epoch = epoch;
+    s_pending_handler = handler; s_pending_context = context;
     s_quotas_changed = true;
     portEXIT_CRITICAL(&s_quota_lock);
+    if (previous_handler != NULL) previous_handler(previous, previous_epoch, false, previous_context);
     note4_quota_snapshot_release(previous);
+}
+void note4_screen_publish_quotas(note4_quota_snapshot_t *snapshot) {
+    note4_screen_stage_quotas(snapshot, 0U, NULL, NULL);
 }
 
 void note4_screen_publish_prefs(note4_display_prefs_t *prefs) {

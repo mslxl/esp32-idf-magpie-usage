@@ -6,6 +6,7 @@ static void semantic_append(semantic_buffer_t *out, const char *text, size_t len
     const size_t needed = out->length + length + 1U;
     if (needed > out->capacity) {
         size_t capacity = needed <= SIZE_MAX / 2U ? needed * 2U : needed;
+        if (capacity > NOTE4_MODEL_BUDGET || !note4_resource_available(capacity)) { out->failed = true; return; }
         char *next = realloc(out->bytes, capacity);
         if (!next) { out->failed = true; return; }
         out->bytes = next; out->capacity = capacity;
@@ -25,7 +26,8 @@ static void semantic_exponent(semantic_buffer_t *out, const char *value, size_t 
     if (*value == '-' || *value == '+') ++value;
     while (*value == '0') ++value;
     const size_t length = strlen(value), width = length > 3U * sizeof(size_t) ? length : 3U * sizeof(size_t);
-    if (width > SIZE_MAX - 2U) { out->failed = true; return; }
+    if (width > SIZE_MAX - 2U || width + 2U > NOTE4_MODEL_BUDGET ||
+        !note4_resource_available(width + 2U)) { out->failed = true; return; }
     unsigned char *digits = calloc(width + 2U, 1U);
     if (!digits) { out->failed = true; return; }
     for (size_t i = 0; i < length; ++i) digits[i] = (unsigned char)(value[length - i - 1U] - '0');
@@ -121,7 +123,8 @@ static void semantic_node(semantic_buffer_t *out, const json_node_t *node, unsig
     if (node->type == JSON_OBJECT || node->type == JSON_ARRAY) {
         size_t n = 0U;
         for (const json_node_t *child = node->child; child; child = child->next) if (!child->name || !semantic_ignored(child->name, level)) ++n;
-        if (n > SIZE_MAX / sizeof(char *)) { out->failed = true; return; }
+        if (n > NOTE4_MODEL_BUDGET / sizeof(char *) ||
+            (n && !note4_resource_available(n * sizeof(char *)))) { out->failed = true; return; }
         char **parts = n ? calloc(n, sizeof(*parts)) : NULL;
         if (n && !parts) { out->failed = true; return; }
         size_t used = 0U;

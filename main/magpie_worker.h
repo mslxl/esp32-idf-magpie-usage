@@ -24,7 +24,9 @@ typedef struct {
     uint32_t retry_seconds;
 } note4_magpie_event_t;
 
-typedef void (*note4_magpie_handler_t)(const note4_magpie_event_t *event, void *context);
+typedef bool (*note4_magpie_handler_t)(const note4_magpie_event_t *event, void *context);
+void note4_magpie_worker_published(unsigned epoch, bool accepted);
+bool note4_magpie_worker_current(unsigned epoch);
 esp_err_t note4_magpie_worker_init(note4_magpie_handler_t handler, void *context);
 unsigned note4_magpie_worker_update(const note4_settings_t *settings, note4_poll_mode_t mode);
 #endif

@@ -18,6 +18,9 @@
 #include "account_directory.h"
 #include "display_prefs.h"
 #include "esp_timer.h"
+#include "esp_app_desc.h"
+#include "nvs.h"
+#include "resource_budget.h"
 
 #define NOTE4_VBAT_LATCH GPIO_NUM_17
 #define NOTE4_CONNECT_TIMEOUT_MS 15000U
@@ -25,7 +28,7 @@
 
 static const char *TAG = "note4";
 
-typedef enum { NOTE4_COORD_WIFI, NOTE4_COORD_BUTTON, NOTE4_COORD_ACTION, NOTE4_COORD_MAGPIE } coord_type_t;
+typedef enum { NOTE4_COORD_WIFI, NOTE4_COORD_BUTTON, NOTE4_COORD_ACTION, NOTE4_COORD_MAGPIE, NOTE4_COORD_PUBLISHED } coord_type_t;
 typedef struct {
     coord_type_t type;
     union {
@@ -44,6 +47,8 @@ typedef struct {
     note4_display_prefs_upload_t prefs_upload;
     note4_provisioning_snapshot_t state;
     QueueHandle_t queue;
+    QueueHandle_t publications;
+    QueueHandle_t publication_results;
     bool screen_started;
     bool transaction_active;
     bool staged_wifi_changed;
@@ -122,12 +127,30 @@ static void enqueue_wifi(const note4_wifi_event_t *event, void *context) {
     (void)xQueueSend(controller->queue, &queued, 0U);
 }
 
-static void enqueue_magpie(const note4_magpie_event_t *event, void *context) {
+static bool quota_published(note4_quota_snapshot_t *snapshot, unsigned epoch, bool accepted, void *context) {
+    controller_t *controller = context;
+    const coord_event_t queued = {.type = NOTE4_COORD_PUBLISHED, .data.magpie = {
+        .epoch = epoch, .snapshot = accepted ? snapshot : NULL, .result = accepted ? NOTE4_MAGPIE_OK : NOTE4_MAGPIE_RESOURCE_EXHAUSTED}};
+    if (!accepted) {
+        note4_magpie_worker_published(epoch, false);
+        return false;
+    }
+    note4_quota_snapshot_retain(snapshot);
+    /* Only the screen produces accepted publications; the coordinator never waits
+     * on its own event queue when replacing a pending candidate. */
+    (void)xQueueSend(controller->publications, &queued, portMAX_DELAY);
+    bool committed = false;
+    (void)xQueueReceive(controller->publication_results, &committed, portMAX_DELAY);
+    return committed;
+}
+
+static bool enqueue_magpie(const note4_magpie_event_t *event, void *context) {
     controller_t *controller = context;
     const coord_event_t queued = {.type = NOTE4_COORD_MAGPIE, .data.magpie = *event};
     note4_quota_snapshot_retain(event->snapshot);
-    if (xQueueSend(controller->queue, &queued, pdMS_TO_TICKS(100)) != pdTRUE)
-        note4_quota_snapshot_release(event->snapshot);
+    if (xQueueSend(controller->queue, &queued, pdMS_TO_TICKS(100)) == pdTRUE) return true;
+    note4_quota_snapshot_release(event->snapshot);
+    return false;
 }
 
 static void pause_magpie(controller_t *controller) {
@@ -412,10 +435,13 @@ static void process_ble(controller_t *controller, const note4_ble_event_t *event
             const bool instance_changed = strcmp(controller->committed.magpie.endpoint, controller->staged.magpie.endpoint) != 0;
             const note4_display_prefs_t *next_prefs = instance_changed ? NULL
                 : controller->staged_prefs != NULL ? controller->staged_prefs : controller->prefs;
-            if (controller->committed.revision == UINT32_MAX || note4_config_store_save_bundle(&controller->staged,
-                    next_prefs != NULL ? next_prefs->bytes : NULL, next_prefs != NULL ? next_prefs->length : 0U) != ESP_OK) {
+            const esp_err_t saved = controller->committed.revision == UINT32_MAX ? ESP_ERR_NO_MEM :
+                note4_config_store_save_bundle(&controller->staged, next_prefs != NULL ? next_prefs->bytes : NULL,
+                    next_prefs != NULL ? next_prefs->length : 0U);
+            if (saved != ESP_OK) {
                 transition(controller, NOTE4_PROVISIONING_EVENT_COMMIT_FAILED);
-                status = NOTE4_BLE_ERR_BUSY;
+                status = saved == ESP_ERR_NO_MEM || saved == ESP_ERR_NVS_NOT_ENOUGH_SPACE
+                    ? NOTE4_BLE_ERR_RESOURCE_EXHAUSTED : NOTE4_BLE_ERR_BUSY;
             } else {
                 if (strcmp(controller->committed.magpie.endpoint, controller->staged.magpie.endpoint) != 0) {
                     note4_screen_publish_quotas(NULL);
@@ -531,14 +557,20 @@ static void coordinator_task(void *arg) {
     }
     note4_screen_publish_prefs(controller->prefs);
     publish_state(controller);
+    int64_t next_diagnostic = 0;
     for (;;) {
+        if (esp_timer_get_time() >= next_diagnostic) {
+            note4_resource_log("coordinator", 0U);
+            next_diagnostic = esp_timer_get_time() + 60000000;
+        }
         note4_ble_event_t ble;
         if (note4_ble_provisioning_receive(&ble, 0U)) {
             process_ble(controller, &ble);
             memset(&ble, 0, sizeof(ble));
         }
         coord_event_t event;
-        if (xQueueReceive(controller->queue, &event, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (xQueueReceive(controller->publications, &event, 0U) == pdTRUE ||
+            xQueueReceive(controller->queue, &event, pdMS_TO_TICKS(20)) == pdTRUE) {
             switch (event.type) {
             case NOTE4_COORD_WIFI: process_wifi(controller, &event.data.wifi); break;
             case NOTE4_COORD_MAGPIE:
@@ -549,13 +581,21 @@ static void coordinator_task(void *arg) {
                     controller->state.magpie_reading = event.data.magpie.reading;
                     controller->state.magpie_retry_seconds = event.data.magpie.retry_seconds;
                     if (event.data.magpie.snapshot != NULL) {
-                        note4_screen_publish_quotas(event.data.magpie.snapshot);
-                        note4_account_directory_update(&controller->directory, event.data.magpie.snapshot);
+                        note4_screen_stage_quotas(event.data.magpie.snapshot, event.data.magpie.epoch, quota_published, controller);
                     }
                     publish_state(controller);
                 }
                 note4_quota_snapshot_release(event.data.magpie.snapshot);
                 break;
+            case NOTE4_COORD_PUBLISHED: {
+                const bool accepted = !configuring(controller) && event.data.magpie.epoch == controller->magpie_epoch &&
+                    event.data.magpie.result == NOTE4_MAGPIE_OK;
+                if (accepted) note4_account_directory_update(&controller->directory, event.data.magpie.snapshot);
+                note4_magpie_worker_published(event.data.magpie.epoch, accepted);
+                (void)xQueueSend(controller->publication_results, &accepted, 0U);
+                note4_quota_snapshot_release(event.data.magpie.snapshot);
+                break;
+            }
             case NOTE4_COORD_ACTION: action(controller, event.data.action); break;
             case NOTE4_COORD_BUTTON:
                 if (event.data.button.button == NOTE4_BUTTON_DOWN &&
@@ -607,6 +647,11 @@ static void wait_for_storage(controller_t *controller) {
 }
 
 void app_main(void) {
+    const esp_app_desc_t *app = esp_app_get_description();
+    ESP_LOGI(TAG, "build version=%s idf=%s elf=%02x%02x%02x%02x%02x%02x%02x%02x",
+        app->version, app->idf_ver, app->app_elf_sha256[0], app->app_elf_sha256[1],
+        app->app_elf_sha256[2], app->app_elf_sha256[3], app->app_elf_sha256[4],
+        app->app_elf_sha256[5], app->app_elf_sha256[6], app->app_elf_sha256[7]);
     const gpio_config_t latch = {
         .pin_bit_mask = 1ULL << NOTE4_VBAT_LATCH, .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -616,7 +661,10 @@ void app_main(void) {
     gpio_set_level(NOTE4_VBAT_LATCH, 1);
     gpio_hold_en(NOTE4_VBAT_LATCH);
     s_controller.queue = xQueueCreate(32, sizeof(coord_event_t));
-    ESP_ERROR_CHECK(s_controller.queue == NULL ? ESP_ERR_NO_MEM : ESP_OK);
+    s_controller.publications = xQueueCreate(1, sizeof(coord_event_t));
+    s_controller.publication_results = xQueueCreate(1, sizeof(bool));
+    ESP_ERROR_CHECK(s_controller.queue == NULL || s_controller.publications == NULL ||
+        s_controller.publication_results == NULL ? ESP_ERR_NO_MEM : ESP_OK);
     ESP_ERROR_CHECK(note4_button_input_init(enqueue_button, &s_controller));
     wait_for_storage(&s_controller);
     ESP_ERROR_CHECK(note4_wifi_manager_init(enqueue_wifi, &s_controller));

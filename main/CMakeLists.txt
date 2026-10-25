@@ -14,7 +14,7 @@ idf_component_register(
          "note4_screen.c" "magpie_client.c" "magpie_transport.c" "magpie_worker.c" "quota_snapshot.c" "quota_order.c" "magpie_poll.c" "account_directory.c" "display_prefs.c"
     INCLUDE_DIRS "."
     REQUIRES ${note4_hello_requires}
-        bt esp_wifi esp_netif esp_event esp_hw_support nvs_flash esp_driver_gpio esp-tls mbedtls esp_timer lwip)
+        bt esp_wifi esp_netif esp_event esp_hw_support nvs_flash esp_driver_gpio esp-tls mbedtls esp_timer lwip esp_app_format)
 
 set(POCKETJS_NOTE4_PACKAGE "" CACHE FILEPATH
     "Use a prebuilt .pocket package instead of invoking the PocketJS CLI")

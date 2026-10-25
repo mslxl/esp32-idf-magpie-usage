@@ -1,4 +1,5 @@
 #include "magpie_client.h"
+#include "resource_budget.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -116,7 +117,7 @@ static int byte(stream_t *stream) {
         if (stream->offset < stream->length) return stream->buffer[stream->offset++];
         const int n = stream->io->read(stream->io->context, stream->buffer, sizeof(stream->buffer));
         if (n == -2) { stream->io->wait(stream->io->context); continue; }
-        if (n <= 0) { stream->error = NOTE4_MAGPIE_NETWORK; return -1; }
+        if (n <= 0) { stream->error = n == -4 ? NOTE4_MAGPIE_RESOURCE_EXHAUSTED : NOTE4_MAGPIE_NETWORK; return -1; }
         stream->offset = 0U; stream->length = (size_t)n;
         stream->progress = stream->io->now_ms(stream->io->context);
     }
@@ -245,14 +246,14 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
     while (alive(&stream)) {
         const int rc = io->open(io->context, url.host, url.port, url.secure);
         if (rc == 1) break;
-        if (rc < 0) { stream.error = rc == -3 ? NOTE4_MAGPIE_CERTIFICATE : NOTE4_MAGPIE_NETWORK; break; }
+        if (rc < 0) { stream.error = rc == -3 ? NOTE4_MAGPIE_CERTIFICATE : rc == -4 ? NOTE4_MAGPIE_RESOURCE_EXHAUSTED : NOTE4_MAGPIE_NETWORK; break; }
         io->wait(io->context);
     }
     size_t written = 0U, request_length = strlen(request);
     while (written < request_length && alive(&stream)) {
         const int n = io->write(io->context, request + written, request_length - written);
         if (n == -2) { io->wait(io->context); continue; }
-        if (n <= 0) { stream.error = NOTE4_MAGPIE_NETWORK; break; }
+        if (n <= 0) { stream.error = n == -4 ? NOTE4_MAGPIE_RESOURCE_EXHAUSTED : NOTE4_MAGPIE_NETWORK; break; }
         written += (size_t)n; stream.progress = io->now_ms(io->context);
     }
     memset(request, 0, 4096U); free(request);
@@ -345,11 +346,13 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
                     break;
                 }
             }
-            if (remaining > SIZE_MAX - response->length - 1U) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
+            if (remaining > SIZE_MAX - response->length - 1U || response->length >= NOTE4_RESPONSE_BUDGET ||
+                remaining >= NOTE4_RESPONSE_BUDGET - response->length) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
             while (remaining && alive(&stream)) {
                 if (response->length + 1U >= capacity) {
-                    const size_t next_capacity = capacity ? capacity + capacity / 2U : 1024U;
-                    if (next_capacity <= capacity) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
+                    size_t next_capacity = capacity ? capacity + capacity / 2U : 1024U;
+                    if (next_capacity > NOTE4_RESPONSE_BUDGET) next_capacity = NOTE4_RESPONSE_BUDGET;
+                    if (next_capacity <= capacity || !note4_resource_available(next_capacity)) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
                     char *next = realloc(response->body, next_capacity);
                     if (next == NULL) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
                     response->body = next; capacity = next_capacity;

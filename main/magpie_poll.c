@@ -20,17 +20,23 @@ void note4_magpie_poll_configure(note4_magpie_poll_t *poll, const note4_settings
     const bool instance_changed = strcmp(poll->settings.magpie.endpoint, settings->magpie.endpoint) != 0;
     const bool saved = poll->settings.revision != settings->revision;
     if (instance_changed) {
+        const bool deferred = poll->defer_publication;
         note4_quota_order_clear(&poll->order);
+        note4_quota_order_clear(&poll->pending_order);
         note4_magpie_poll_init(poll);
+        poll->defer_publication = deferred;
         poll->paused_at = now;
     } else if (poll->mode == NOTE4_POLL_SETUP && mode != NOTE4_POLL_SETUP && poll->failed) {
         poll->failed_at = add(poll->failed_at, now - poll->paused_at);
     }
     if (mode == NOTE4_POLL_SETUP && poll->mode != NOTE4_POLL_SETUP) poll->paused_at = now;
-    if (saved || instance_changed || (!poll->settings.magpie.key[0] && settings->magpie.key[0])) {
+    const bool credentials_changed = strcmp(poll->settings.magpie.key, settings->magpie.key) != 0 ||
+        poll->settings.web.allow_plain_http != settings->web.allow_plain_http;
+    if (instance_changed || credentials_changed || (saved && poll->halted)) {
         memset(&poll->session, 0, sizeof(poll->session));
         poll->relogin_used = false; poll->halted = false; poll->login_pending = true;
     }
+    if (saved) poll->relogin_used = false;
     poll->settings = *settings;
     poll->mode = mode; poll->following = false; poll->followups = 0U;
     if (mode == NOTE4_POLL_OFFLINE && !poll->halted) {
@@ -113,7 +119,9 @@ bool note4_magpie_poll_step(note4_magpie_poll_t *poll, const note4_magpie_io_t *
         poll->next_due = completed;
         return true;
     }
-    if (!login && result == NOTE4_MAGPIE_OK && note4_quota_order_observe(&poll->order, *snapshot) != NOTE4_QUOTA_OK) {
+    if (!login && result == NOTE4_MAGPIE_OK && (poll->defer_publication
+            ? note4_quota_order_prepare(&poll->order, *snapshot, &poll->pending_order)
+            : note4_quota_order_observe(&poll->order, *snapshot)) != NOTE4_QUOTA_OK) {
         note4_quota_snapshot_release(*snapshot); *snapshot = NULL;
         result = NOTE4_MAGPIE_RESOURCE_EXHAUSTED;
     }
@@ -125,8 +133,11 @@ bool note4_magpie_poll_step(note4_magpie_poll_t *poll, const note4_magpie_io_t *
         poll->login_pending = false; poll->next_due = completed;
         return true;
     }
-    poll->result = NOTE4_MAGPIE_OK; poll->failed = false; poll->failures = 0U;
-    poll->has_snapshot = true; poll->reading = response.reading;
+    if (!poll->defer_publication) {
+        poll->result = NOTE4_MAGPIE_OK; poll->failed = false; poll->failures = 0U;
+        poll->has_snapshot = true;
+    }
+    poll->reading = response.reading;
     advance_normal(poll, completed);
     poll->following = response.reading && poll->followups < 20U;
     poll->next_due = poll->following ? add(completed, 1500U) : poll->normal_due;

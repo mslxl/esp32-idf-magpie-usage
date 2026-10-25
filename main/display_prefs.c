@@ -1,4 +1,5 @@
 #include "display_prefs.h"
+#include "resource_budget.h"
 #include <stdlib.h>
 #include <string.h>
 #include "casefold_data.h"
@@ -113,6 +114,8 @@ static note4_ble_status_t identities(reader_t *r, note4_account_identity_t **out
 }
 note4_ble_status_t note4_display_prefs_parse(const uint8_t *bytes, size_t length, note4_display_prefs_t **output) {
     if (bytes == NULL || output == NULL || length < 20U || length > UINT32_MAX || length == SIZE_MAX) return NOTE4_BLE_ERR_VALIDATION;
+    if (length > NOTE4_DOCUMENT_BUDGET || !note4_resource_available(length * 4U + sizeof(note4_display_prefs_t)))
+        return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     if (bytes[0] != 2U) return NOTE4_BLE_ERR_UNSUPPORTED_SCHEMA;
     if (bytes[1] > 2U || bytes[2] > 1U || bytes[3] > 15U) return NOTE4_BLE_ERR_VALIDATION;
     note4_display_prefs_t *prefs = calloc(1U, sizeof(*prefs));
@@ -178,6 +181,7 @@ void note4_display_prefs_upload_clear(note4_display_prefs_upload_t *upload) {
 note4_ble_status_t note4_display_prefs_begin(note4_display_prefs_upload_t *upload,
     uint32_t revision, uint32_t length, uint32_t crc, uint64_t now) {
     if (length < 20U) return NOTE4_BLE_ERR_LENGTH;
+    if (length > NOTE4_DOCUMENT_BUDGET || !note4_resource_available(length)) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     uint8_t *candidate = malloc(length);
     if (candidate == NULL) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     note4_display_prefs_upload_clear(upload);

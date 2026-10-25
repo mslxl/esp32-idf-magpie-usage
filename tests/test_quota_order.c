@@ -34,5 +34,15 @@ int main(void) {
     observe(&order, "[{\"provider\":\"A\",\"windows\":[{\"used\":10e999999999999999999998}]},{\"provider\":\"B\",\"balance\":\"$1\"}]", "BA");
     observe(&order, "[{\"provider\":\"A\",\"windows\":[{\"used\":100e999999999999999999997}]},{\"provider\":\"B\",\"balance\":\"$1\"}]", "BA");
     note4_quota_order_clear(&order);
+    observe(&order, "[{\"provider\":\"A\",\"balance\":\"$1\"},{\"provider\":\"B\",\"balance\":\"$2\"}]", "AB");
+    note4_quota_snapshot_t *rejected = parse("[{\"provider\":\"A\",\"balance\":\"$1\"},{\"provider\":\"B\",\"balance\":\"$3\"}]");
+    note4_quota_order_t pending = {0};
+    CHECK(note4_quota_order_prepare(&order, rejected, &pending) == NOTE4_QUOTA_OK);
+    CHECK(note4_quota_order_index(&pending, 0U) == 1U);
+    CHECK(note4_quota_order_index(&order, 0U) == 0U);
+    note4_quota_order_clear(&pending); note4_quota_snapshot_release(rejected);
+    /* A rejected page must not make the same later change look unchanged. */
+    observe(&order, "[{\"provider\":\"A\",\"balance\":\"$1\"},{\"provider\":\"B\",\"balance\":\"$3\"}]", "BA");
+    note4_quota_order_clear(&order);
     puts("smart quota order exact semantics and stable partition passed"); return 0;
 }

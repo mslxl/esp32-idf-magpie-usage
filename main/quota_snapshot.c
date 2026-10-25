@@ -1,4 +1,5 @@
 #include "quota_snapshot.h"
+#include "resource_budget.h"
 
 #include <stdio.h>
 #include <stdatomic.h>
@@ -18,9 +19,18 @@ struct note4_quota_snapshot {
     json_node_t *root;
     json_node_t **cards;
     size_t *smart_ranks;
-    size_t count;
+    size_t count, bytes;
 };
-typedef struct { const unsigned char *p, *end; unsigned depth; note4_quota_result_t error; } parser_t;
+typedef struct { const unsigned char *p, *end; unsigned depth; size_t bytes; note4_quota_result_t error; } parser_t;
+static void *parse_allocate(parser_t *parser, size_t bytes, bool zero) {
+    if (bytes > NOTE4_MODEL_BUDGET - parser->bytes || !note4_resource_available(bytes)) {
+        parser->error = NOTE4_QUOTA_NO_MEMORY; return NULL;
+    }
+    void *memory = zero ? calloc(1U, bytes) : malloc(bytes);
+    if (memory == NULL) parser->error = NOTE4_QUOTA_NO_MEMORY;
+    else parser->bytes += bytes;
+    return memory;
+}
 
 static void destroy(json_node_t *node) {
     while (node != NULL) {
@@ -58,7 +68,7 @@ static char *string(parser_t *parser) {
         else escaped = false;
     }
     if (scan == parser->end) return NULL;
-    char *text = malloc((size_t)(scan - start) + 1U);
+    char *text = parse_allocate(parser, (size_t)(scan - start) + 1U, false);
     if (text == NULL) { parser->error = NOTE4_QUOTA_NO_MEMORY; return NULL; }
     size_t length = 0U;
     while (parser->p < scan) {
@@ -122,7 +132,7 @@ invalid:
 static json_node_t *parse(parser_t *parser) {
     whitespace(parser);
     if (parser->p >= parser->end || parser->depth >= 64U) return NULL;
-    json_node_t *node = calloc(1U, sizeof(*node));
+    json_node_t *node = parse_allocate(parser, sizeof(*node), true);
     if (node == NULL) { parser->error = NOTE4_QUOTA_NO_MEMORY; return NULL; }
     ++parser->depth;
     const unsigned char c = *parser->p;
@@ -176,7 +186,7 @@ static json_node_t *parse(parser_t *parser) {
             while (parser->p < parser->end && *parser->p >= '0' && *parser->p <= '9') ++parser->p;
         }
         const size_t length = (size_t)(parser->p - start);
-        node->text = malloc(length + 1U);
+        node->text = parse_allocate(parser, length + 1U, false);
         if (node->text == NULL) { parser->error = NOTE4_QUOTA_NO_MEMORY; goto invalid; }
         memcpy(node->text, start, length); node->text[length] = 0; node->type = JSON_NUMBER;
     } else {
@@ -185,7 +195,7 @@ static json_node_t *parse(parser_t *parser) {
         if ((size_t)(parser->end - parser->p) < length || memcmp(parser->p, literal, length) != 0) goto invalid;
         parser->p += length; node->type = c == 'n' ? JSON_NULL : JSON_BOOL;
         if (node->type == JSON_BOOL) {
-            node->text = malloc(length + 1U);
+            node->text = parse_allocate(parser, length + 1U, false);
             if (node->text == NULL) { parser->error = NOTE4_QUOTA_NO_MEMORY; goto invalid; }
             memcpy(node->text, literal, length + 1U);
         }
@@ -262,16 +272,18 @@ note4_quota_result_t note4_quota_snapshot_parse(const char *json, size_t length,
     for (const json_node_t *card = root->child; card; card = card->next) {
         if (!validate_card(card)) { destroy(root); return NOTE4_QUOTA_INVALID; }
     }
-    note4_quota_snapshot_t *snapshot = calloc(1U, sizeof(*snapshot));
+    note4_quota_snapshot_t *snapshot = parse_allocate(&parser, sizeof(*snapshot), true);
     if (snapshot == NULL) { destroy(root); return NOTE4_QUOTA_NO_MEMORY; }
     atomic_init(&snapshot->references, 1U); snapshot->root = root; snapshot->count = count(root);
     if (snapshot->count > SIZE_MAX / sizeof(*snapshot->cards)) { note4_quota_snapshot_release(snapshot); return NOTE4_QUOTA_NO_MEMORY; }
     if (snapshot->count) {
-        snapshot->cards = malloc(snapshot->count * sizeof(*snapshot->cards));
+        snapshot->cards = parse_allocate(&parser, snapshot->count * sizeof(*snapshot->cards), false);
         if (snapshot->cards == NULL) { note4_quota_snapshot_release(snapshot); return NOTE4_QUOTA_NO_MEMORY; }
         size_t i = 0U;
         for (json_node_t *card = root->child; card; card = card->next) snapshot->cards[i++] = card;
     }
+    snapshot->bytes = parser.bytes;
+    note4_resource_log("snapshot", parser.bytes);
     *output = snapshot; return NOTE4_QUOTA_OK;
 }
 void note4_quota_snapshot_retain(note4_quota_snapshot_t *snapshot) { if (snapshot) (void)atomic_fetch_add(&snapshot->references, 1U); }
@@ -284,7 +296,8 @@ size_t note4_quota_smart_rank(const note4_quota_snapshot_t *snapshot, size_t car
 }
 note4_quota_result_t note4_quota_set_smart_order(note4_quota_snapshot_t *snapshot, const size_t *indices) {
     if (!snapshot || (snapshot->count && !indices)) return NOTE4_QUOTA_INVALID;
-    if (snapshot->count > SIZE_MAX / sizeof(size_t)) return NOTE4_QUOTA_NO_MEMORY;
+    if (snapshot->count > (NOTE4_MODEL_BUDGET - snapshot->bytes) / sizeof(size_t) ||
+        !note4_resource_available(snapshot->count * sizeof(size_t))) return NOTE4_QUOTA_NO_MEMORY;
     size_t *ranks = snapshot->count ? malloc(snapshot->count * sizeof(*ranks)) : NULL;
     if (snapshot->count && !ranks) return NOTE4_QUOTA_NO_MEMORY;
     for (size_t i = 0; i < snapshot->count; ++i) ranks[i] = SIZE_MAX;

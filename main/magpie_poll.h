@@ -6,7 +6,8 @@ typedef enum { NOTE4_POLL_SETUP, NOTE4_POLL_OFFLINE, NOTE4_POLL_ONLINE } note4_p
 typedef struct {
     note4_settings_t settings;
     note4_magpie_session_t session;
-    note4_quota_order_t order;
+    note4_quota_order_t order, pending_order;
+    bool defer_publication;
     note4_poll_mode_t mode;
     note4_magpie_result_t result;
     uint64_t next_due, normal_due, retry_after, failed_at, paused_at;

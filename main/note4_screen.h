@@ -13,6 +13,9 @@ esp_err_t note4_screen_init(note4_screen_action_handler_t handler, void *context
 esp_err_t note4_screen_render(const note4_provisioning_snapshot_t *snapshot);
 /* Retains the latest complete snapshot; NULL clears data for a changed instance. */
 void note4_screen_publish_quotas(note4_quota_snapshot_t *snapshot);
+typedef bool (*note4_screen_quota_handler_t)(note4_quota_snapshot_t *snapshot, unsigned epoch, bool accepted, void *context);
+void note4_screen_stage_quotas(note4_quota_snapshot_t *snapshot, unsigned epoch,
+    note4_screen_quota_handler_t handler, void *context);
 void note4_screen_publish_prefs(note4_display_prefs_t *prefs);
 void note4_screen_button(note4_button_id_t button);
 

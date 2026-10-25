@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, ErrorBoundary, For, Show } from "solid-js";
 import { getOps } from "@pocketjs/framework/host";
 import { quotaLineHeight } from "./quota-fonts";
 import { createBakedFontCoverage } from "./third_party/pocketjs/framework/src/font-coverage";
@@ -11,7 +11,7 @@ type Status = { state: string; slot: number; round: number; storageError?: boole
   magpiePhase: number; magpieResult: number; magpieErrorPage: boolean; magpieReading: boolean; magpieRetrySeconds: number; timezone: string; layout: string; adaptiveFont: boolean };
 type Note4 = {
   status: Status;
-  quotas: { info(): { available: boolean; version: number; count: number }; card(index: number): QuotaCard; visible(index: number): boolean; rank(index: number): number };
+  quotas: { settle?(accepted: boolean): void; materialized?(accepted: boolean): void; info(): { available: boolean; version: number; count: number }; card(index: number): QuotaCard; visible(index: number): boolean; rank(index: number): number };
   ble: { name: string; requestAction(action: number): void };
   display: { setMode(mode: "1bpp" | "4bpp"): void };
 };
@@ -99,9 +99,21 @@ export default function App() {
   const [page, setPage] = createSignal(0);
   const covered = createBakedFontCoverage();
   let version = -1, minute = -1, timezone = "", layoutKey = "", renderedPage = -1;
+  let rollback: (() => void) | undefined;
+  let resetRender: (() => void) | undefined;
+  native.quotas.settle = accepted => {
+    if (!accepted) rollback?.();
+    rollback = undefined;
+    const reset = resetRender;
+    resetRender = undefined;
+    reset?.();
+  };
   const banner = (value: Status) => value.state !== "connected" ? "Last data - offline; reconnecting" : value.magpiePhase === 6
-    ? `Last data - ${value.magpieResult === 6 ? "request timed out" : "reading failed"}`
+    ? `Last data - ${({ 6: "request timed out", 8: "invalid response", 9: "resource exhausted", 10: "rate limited" } as Record<number, string>)[value.magpieResult] || "reading failed"}`
     : value.magpieReading ? "Magpie Usage - reading" : "";
+  const recovery = (value: Status) => value.state !== "connected" ? "Wi-Fi reconnecting"
+    : value.magpiePhase === 6 ? value.magpieRetrySeconds > 0 ? `Retry in ${value.magpieRetrySeconds}s` : "Retrying request"
+    : "Waiting for provider readings";
   const blocked = () => status().magpiePhase === 6 && [1, 2, 3, 4].includes(status().magpieResult);
   const showQuotas = () => available() && !status().storageError && !inSetup(status()) && !status().pairing && !blocked() && !status().magpieErrorPage;
   onFrame(() => {
@@ -120,6 +132,13 @@ export default function App() {
         (text, slot = 2) => host.measureText(text, slot), (scalar, slot = 2) => covered(scalar, slot),
         host.wrapText ? (text, width, slot = 2) => host.wrapText!(text, slot, width) : undefined, now, next.timezone || "UTC",
         { layout: next.layout, adaptive: next.adaptiveFont, top: banner(next) ? 62 : 38, lineHeight: quotaLineHeight });
+      const previous = { rows: rows(), filtered: filtered(), count: pageCount(), page: page(), available: available(),
+        version, minute, timezone, layoutKey, renderedPage };
+      rollback = () => {
+        setRows(previous.rows); setFiltered(previous.filtered); setPageCount(previous.count);
+        setPage(previous.page); setAvailable(previous.available);
+        ({ version, minute, timezone, layoutKey, renderedPage } = previous);
+      };
       if (JSON.stringify(result.rows) !== JSON.stringify(rows())) setRows(result.rows);
       setFiltered(nextFiltered);
       setPageCount(result.count);
@@ -127,8 +146,10 @@ export default function App() {
       setAvailable(info.available);
       version = info.version;
       minute = Math.floor(now / 60000); timezone = next.timezone; layoutKey = nextLayoutKey;
+      native.quotas.materialized?.(true);
       } catch {
-        // Keep the last complete page; retry materialization on the next UI turn.
+        native.quotas.materialized?.(false);
+        // Keep the last complete page; the native owner rejects the candidate.
       }
     }
     if (next.state && (next.state !== status().state || next.storageError !== status().storageError || next.slot !== status().slot ||
@@ -147,6 +168,11 @@ export default function App() {
     if (status().state === "discard") native.ble.requestAction(4);
   }, { allowWhenBlocked: true });
   return (
+    <ErrorBoundary fallback={(_error, reset) => {
+      resetRender = reset;
+      native.quotas.materialized?.(false);
+      return null;
+    }}>
     <Show when={showQuotas()} fallback={
     <View class="w-full h-full flex-col p-6 justify-between" style={{ bgColor: "#FFFFFF" }}>
       <Text class="text-lg font-bold" style={{ textColor: "#000000" }}>Magpie Usage</Text>
@@ -170,9 +196,11 @@ export default function App() {
       </Modal>
     </View>}>
       <View class="w-full h-full" style={{ bgColor: "#FFFFFF" }}>
-        <Text class="absolute text-lg" style={{ insetL: 8, insetT:8, width: 384, height: 24, textColor: "#000000" }}>Magpie Usage</Text>
-        <Show when={banner(status())}>
-          <Text class="absolute text-sm" style={{ insetL: 8, insetT:34, width: 384, height: 22, textColor: "#000000" }}>{banner(status())}</Text>
+        <Show when={banner(status())} fallback={
+          <Text class="absolute text-lg" style={{ insetL: 8, insetT:8, width: 384, height: 24, textColor: "#000000" }}>Magpie Usage</Text>
+        }>
+          <Text class="absolute text-base" style={{ insetL: 8, insetT:8, width: 384, height: 22, textColor: "#000000" }}>{banner(status())}</Text>
+          <Text class="absolute text-sm" style={{ insetL: 8, insetT:34, width: 384, height: 22, textColor: "#000000" }}>{recovery(status())}</Text>
         </Show>
         <Show when={pageCount() > 0} fallback={
           <Text class="absolute text-base" style={{ insetL: 8, insetT:100, width: 384, height: 24, textColor: "#000000" }}>{filtered() ? "No accounts match display settings" : "No accounts"}</Text>
@@ -195,5 +223,6 @@ export default function App() {
         </Text>
       </View>
     </Show>
+    </ErrorBoundary>
   );
 }

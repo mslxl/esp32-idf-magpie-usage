@@ -96,6 +96,38 @@ Review used local changes against `57277e9`, with Standards and Spec checked sep
 
 After this fix, `just test` passed 13/13, Web Vitest passed 20/20, Web TypeScript/production build passed, and the packaged PocketJS tests passed 18/18 with 216 assertions. The initial firmware build was stopped by an incorrectly short command deadline; `just clean` followed by `just build` completed successfully with ESP-IDF 6.1 and pinned PocketJS. Application size is `0x31ce10`, leaving `0xe31f0` bytes (22%) in the app partition. The existing `.note.GNU-stack` toolchain warning remains. No firmware flash was performed.
 
+## Resource and render publication follow-up — 2026-10-26
+
+Network results now prepare a candidate smart order and retain the previous snapshot until PocketJS materialization, rendering/presentation and the coordinator's epoch check accept the candidate. Only accepted candidates update the account directory and committed smart baseline. Separate publication/result queues avoid a coordinator waiting on its own full event queue. Epoch updates and worker publication acknowledgments share a critical section. A settings change can invalidate a page after physical presentation; restoration then occurs on a later frame.
+
+Response, model, directory and preference paths now check candidate byte limits and available free/largest blocks. Transport allocation failures have a distinct resource result, and stale errno cannot change a later TLS read/write classification. Screen/worker/coordinator diagnostics report memory and stack watermarks; startup reports build identity. `tools/magpie_fixture.py` provides a synthetic socket peer, and `tools/note4_endurance.py` captures allowlisted diagnostics without retaining arbitrary SDK/network output. These tools prepare hardware verification; they do not establish that it has occurred.
+
+The packaged UI failure regression first failed: after a synthetic native-host setText exception, restoring old signals left later successful data unable to update the page. A Solid ErrorBoundary now reports failed materialization; settlement restores old page signals and resets the boundary so later data can render. Native status construction preserves the previous status object on failure, rejects QuickJS exception values as properties, and clears exceptions on the allocation-failure return path. Failed materialization stops before EPD presentation. This regression covers a throwable host operation, not arbitrary native allocator failure.
+
+Automated evidence for this follow-up:
+
+- Native public-interface CTest passed 13/13, including allocator failures, storage recovery and rejected smart-order candidates. Web Vitest passed 20/20, and Web TypeScript/Vite production build passed. Web sources did not change after those runs.
+- Real Chromium with synthetic GATT passed five-slot editing, saved/sparse readback, focus retention, independent tab saves, Magpie metadata reconnect and explicit exit. Screenshots were inspected. This remains simulated radio evidence.
+- The final packaged PocketJS suite passed 20/20 with 222 assertions, including rejection after presentation, UI mutation failure/rollback and subsequent successful data. It uses the actual pinned package and baked font metrics.
+- The ignored `.pocket-build/validation/smoke_acceptance_tools.py` drove the fixture over a real loopback socket, checking sign-in/form/prefix/Cookie, 401, reading, 429, empty results and repeat-last behavior. Collector smoke checked allowlisting, rejection of secret-bearing lines, fault markers and a synthetic 24-hour summary. Both checks passed. No COM5 capture or real 24-hour run occurred.
+- Initial firmware attempts exposed missing `esp_app_format` dependency and missing `nvs.h`; both were fixed. `just clean` then `just build` succeeded. The later build with the ErrorBoundary and atomic status fixes succeeded: application `0x31f3f0`, free `0xe0c10` (22%). The subsequent build including exception cleanup also succeeded: application `0x31f3d0`, free `0xe0c30` (22%). Its embedded version is `3a87f7f-dirty`, reflecting the pre-commit source tree; bin SHA-256 is `31fe925125f0ef16df54e8c12a9f91c831883de8ab71474969f35d50e5b78e97`, ELF SHA-256 is `215766946369184a3281c0b9cf4d4d6276437f9eb55bd5839c379bc090db0d95`. Files are `C:/n4idf-provisioning/pocketjs_note4_hello.bin` and `.elf`; the package is `.pocket-build/package/note4-hello.pocket`. The existing `.note.GNU-stack` linker warning remains.
+
+Review covers fixed baseline `57277e995933ce3df85c49b68827a95923246a3a` through the working tree, including committed storage recovery. Per the user's instruction, both axes were reviewed in this session without agents.
+
+### Standards
+
+No outstanding documented-standard violations found in the reviewed changes. PocketJS components/lifecycle/input stay imported from `@pocketjs/framework/*`, while Solid primitives and ErrorBoundary come from `solid-js`. Validation output remains ignored. New resource checks follow the surrounding C error/ownership conventions. No baseline smell warrants a separate refactor in this patch.
+
+### Spec
+
+Three requirements remain partial:
+
+1. **#22 recoverable allocation failure:** the pinned PocketJS Rust UI/render implementation has fatal allocation paths (`engine/ui-cabi/src/lib.rs`, and the explicit warning in `ui_qjs.h`). ErrorBoundary cannot catch native abort, and persistent OOM can also prevent rollback/reset. This is an unresolved software requirement, beyond missing hardware evidence. Preference swaps and guest status are also outside the quota rollback closure; no complete transaction guarantee is established for simultaneous failures across these paths.
+2. **#22 measured combined budgets:** current limits (384 KiB body including NUL, 1536 KiB parsed model/index, 384 KiB documents, 32 KiB internal reserve, 256 KiB PSRAM reserve) are engineering candidates. Domain caps and free/largest checks do not constitute a unified allocation ledger or establish target internal/TLS/renderer peaks. Target measurements must set the final limits.
+3. **#13/#22/#23 target integration and endurance:** host HTTP replay, loopback fixture and packaged JS tests do not execute the ESP TLS adapter, FreeRTOS publication handshake or physical EPD under injected failures. Real authenticated BLE, public-CA TLS, NVS space/power interruption, physical display and 24-hour combined evidence are outstanding.
+
+Review totals: Standards 0; Spec 3 partial requirements. The principal Standards concern is none found; the principal Spec gap is unrecoverable native allocation exhaustion. No tickets were closed and parent #11 was not modified. Use `docs/note4-acceptance.md` for the 21 ordered device checks. No push, deployment or firmware flash was performed in this follow-up.
+
 ## Remaining physical acceptance
 
 The development host did not report a present Bluetooth adapter. These cases remain unverified against a real BLE central and AP:

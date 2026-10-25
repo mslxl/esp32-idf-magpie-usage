@@ -1,4 +1,5 @@
 #include "quota_order.h"
+#include "resource_budget.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,10 +8,12 @@ static bool identity(const note4_quota_snapshot_t *a, size_t ai, const note4_quo
         !strcmp(note4_quota_text(a, ai, "user"), note4_quota_text(b, bi, "user"));
 }
 
-note4_quota_result_t note4_quota_order_observe(note4_quota_order_t *order, note4_quota_snapshot_t *snapshot) {
-    if (!order || !snapshot) return NOTE4_QUOTA_INVALID;
+note4_quota_result_t note4_quota_order_prepare(const note4_quota_order_t *order, note4_quota_snapshot_t *snapshot,
+    note4_quota_order_t *candidate) {
+    if (!order || !snapshot || !candidate || candidate == order) return NOTE4_QUOTA_INVALID;
     const size_t count = note4_quota_count(snapshot), previous_count = note4_quota_count(order->baseline);
-    if (count > SIZE_MAX / sizeof(size_t)) return NOTE4_QUOTA_NO_MEMORY;
+    if (count > SIZE_MAX / (sizeof(size_t) * 3U + sizeof(bool)) ||
+        !note4_resource_available(count * (sizeof(size_t) * 3U + sizeof(bool)))) return NOTE4_QUOTA_NO_MEMORY;
     size_t *indices = count ? malloc(count * sizeof(*indices)) : NULL;
     size_t *matched = count ? malloc(count * sizeof(*matched)) : NULL;
     bool *changed = count ? calloc(count, sizeof(*changed)) : NULL;
@@ -61,11 +64,20 @@ note4_quota_result_t note4_quota_order_observe(note4_quota_order_t *order, note4
     result = note4_quota_set_smart_order(snapshot, indices);
     if (result != NOTE4_QUOTA_OK) goto failure;
     note4_quota_snapshot_retain(snapshot);
-    note4_quota_order_clear(order);
-    order->baseline = snapshot; order->indices = indices;
+    note4_quota_order_clear(candidate);
+    candidate->baseline = snapshot; candidate->indices = indices;
     free(matched); free(changed); return NOTE4_QUOTA_OK;
 failure:
     free(indices); free(matched); free(changed); return result;
+}
+note4_quota_result_t note4_quota_order_observe(note4_quota_order_t *order, note4_quota_snapshot_t *snapshot) {
+    note4_quota_order_t candidate = {0};
+    const note4_quota_result_t result = note4_quota_order_prepare(order, snapshot, &candidate);
+    if (result == NOTE4_QUOTA_OK) {
+        note4_quota_order_clear(order);
+        *order = candidate;
+    }
+    return result;
 }
 size_t note4_quota_order_index(const note4_quota_order_t *order, size_t position) {
     return order && position < note4_quota_count(order->baseline) ? order->indices[position] : SIZE_MAX;
