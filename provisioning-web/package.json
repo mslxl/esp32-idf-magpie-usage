@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:browser": "bun browser-validation.ts"
   },
   "dependencies": {
     "vite-plugin-solid": "latest",
@@ -15,6 +16,7 @@
   "devDependencies": {
     "@types/node": "latest",
     "jsdom": "latest",
+    "playwright": "1.61.1",
     "typescript": "^5.9.3",
     "vitest": "latest"
   }

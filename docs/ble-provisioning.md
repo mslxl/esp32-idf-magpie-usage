@@ -33,8 +33,13 @@ The coordinator sends ACK/NACK after processing a complete request. Browser retr
 | 0x02 GET_STATUS | Reply committed SSIDs and password-presence flags |
 | 0x03 SCAN | Start an asynchronous 2.4 GHz scan |
 | 0x04 SET_SLOT | Edit one staged slot |
-| 0x05 COMMIT | Validate and commit the entire blob; leave setup and connect |
-| 0x06 ABORT | Discard staging and leave setup |
+| 0x05 COMMIT | Validate and commit the entire settings blob; stay in setup |
+| 0x06 ABORT | Discard staging and leave setup (legacy command) |
+| 0x07 SET_MAGPIE | Legacy gateway write: rejected with UNSUPPORTED_SCHEMA |
+| 0x08 GET_MAGPIE | Legacy gateway read: rejected with UNSUPPORTED_SCHEMA |
+| 0x09 EXIT_SETUP | Discard staging, leave setup and connect using saved networks |
+| 0x0a GET_WEB_SETTINGS | Read committed Web/display metadata |
+| 0x0b SET_WEB_SETTINGS | Edit staged schema-2 Web/display settings |
 | 0x80 ACK | One-byte status 0 |
 | 0x81 NACK | One-byte error code |
 | 0x82 STATUS | Current state and committed configuration metadata |
@@ -45,17 +50,27 @@ The coordinator sends ACK/NACK after processing a complete request. Browser retr
 | 0x87 CONNECTED | IP acquired |
 | 0x88 CONNECTION_FAILED | Current slot failed |
 | 0x89 FAILURE | Three rounds exhausted |
+| 0x8a MAGPIE_STATUS | Reserved legacy gateway response |
+| 0x8b WEB_SETTINGS | Schema-2 Web/display metadata, never key bytes |
 
 Error codes: 1 version, 2 length, 3 CRC, 4 sequence, 5 state, 6 validation, 7 busy, 8 unauthorized. Configuration commands require setup mode. Request IDs correlate ACK and scan/status results; unsolicited progress uses ID zero. A successful COMMIT ACK is sent after `nvs_commit`.
 
-SET_SLOT payload: `enabled:u8, passwordMode:u8, ssidLength:u8, ssid:utf8`; mode SET additionally appends `passwordLength:u8, password:utf8`. Modes: 0 unchanged, 1 set, 2 clear. Unchanged requires the same SSID in the same committed slot. Disabled slots are empty. SSIDs are limited to 32 bytes and passwords to 64 bytes. COMMIT requires 1–5 enabled slots and rejects duplicate SSIDs. Empty password selects an open network.
+SET_SLOT payload: `enabled:u8, passwordMode:u8, ssidLength:u8, ssid:utf8`; mode SET additionally appends `passwordLength:u8, password:utf8`. Modes: 0 unchanged, 1 set, 2 clear. Unchanged requires the same SSID in the same committed slot. Disabled slots are empty. SSIDs are limited to 32 bytes and passwords to 64 bytes. Network edits require 1–5 enabled slots and reject duplicate SSIDs; a Magpie-only COMMIT may retain an empty network configuration. Empty password selects an open network.
 
 STATUS payload: `state:u8, configuredMask:u8`, then five records `ssidLength:u8, ssid:utf8, passwordPresent:u8`. Password bytes are never returned. State ordinals follow `main/provisioning_state.h`: boot 0, configuring 1, discard 2, applying 3, connecting 4, connected 5, failure 6.
 
 SCAN_RESULT payload: `ssidLength:u8, ssid:utf8, rssi:i8, channel:u8, secure:u8`. Length prefix preserves tabs and other SSID characters. Empty/hidden scan records are omitted; hidden SSIDs can be entered manually. At most 32 AP records are sent. The Wi-Fi driver owns scan results until they are consumed.
 
+BEGIN payload: `schema:u8=2, expectedRevision:u32`. Empty/legacy BEGIN is rejected. Revision mismatch returns STALE_REVISION before staging changes. COMMIT increments the revision after durable saving.
+
+SET_WEB_SETTINGS payload: `schema:u8=2, expectedRevision:u32, keyMode:u8, flags:u8, intervalSeconds:u16, timezoneLength:u8, endpointLength:u16, keyLength:u16, endpoint:utf8, key:ascii, timezone:ascii`. Flags: bit 0 allows HTTP, bit 1 enables adaptive font, bit 2 selects layout B; unknown bits are rejected. Key modes: 0 keep, 1 replace, 2 clear. Address maximum is 512 bytes; replacement Web key is 16–256 bytes with characters `[A-Za-z0-9._~-]`. Keep requires an equivalent canonical instance address. Empty address requires an empty key. URLs reject userinfo, query, fragments, controls, whitespace, backslash, percent escapes and ambiguous dot/repeated-slash paths. Host case, default port and trailing slash normalize before instance comparison. HTTP is rejected unless flag 0 is set.
+
+WEB_SETTINGS payload: `schema:u8=2, revision:u32, keyPresent:u8, flags:u8, intervalSeconds:u16, timezoneLength:u8, endpointLength:u16, endpoint:utf8, timezone:ascii`. It never contains Web key bytes. Empty timezone means not yet configured; the browser then pre-fills its own IANA zone. Supported zones are the explicit common-zone list shared by the page and firmware; unsupported values fail validation. Interval range is 30–3600 seconds. Error codes additionally include 9 UNSUPPORTED_SCHEMA, 10 STALE_REVISION, 11 NO_DIRECTORY and 12 RESOURCE_EXHAUSTED.
+
+BEGIN copies both saved sections into staging. The browser applies only the active tab, leaving the other saved section intact. COMMIT ACK follows durable saving and returns to configuring, retaining authenticated BLE access. The user explicitly exits using EXIT_SETUP or the device OK confirmation; only then do network attempts begin. Unapplied changes are discarded on exit, disconnect or two-minute transaction expiry. Older firmware rejects the extension opcodes; the browser requires updated firmware before saving.
+
 ## Persistence and hardware
 
-The native coordinator validates and stores one NVS blob with magic/version/length/generation/CRC32. Credentials are not logged, exposed to PocketJS, or sent in status notifications. The current development build does not enable flash or NVS encryption; protection against physical flash extraction requires a product key/provisioning policy.
+The native coordinator stores an explicitly encoded `N4S2` Wi-Fi/Web settings record with length, revision and CRC32 under `web_settings_v2`. Known legacy combined records are validated by version/size/CRC, then Wi-Fi is retained while old gateway address/key are cleared. Wi-Fi-only records also migrate. Invalid or unknown records produce an explicit error and never fall back to stale credentials. Initialization never erases the NVS partition. Saving uses NVS blob replacement and commit; no old record is erased to make room. Credentials are not logged, exposed to PocketJS, or sent in status notifications. The current development build does not enable flash or NVS encryption; protection against physical flash extraction requires a product key/provisioning policy.
 
 Device UI uses PocketJS Solid, including its Modal and input lifecycle. GPIO39 is UP, GPIO0 is OK, GPIO18 is DOWN, and GPIO17 holds the battery latch. Reference: https://wiki.zectrix.com/zh/software/note4-development-guide .

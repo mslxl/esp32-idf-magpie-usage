@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "provisioning-web/**"
+      - "supported-timezones.ts"
       - ".github/workflows/provisioning-pages.yml"
   workflow_dispatch:
 

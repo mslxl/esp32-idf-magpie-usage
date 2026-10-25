@@ -14,6 +14,7 @@ typedef enum {
     NOTE4_BLE_EVENT_DISCONNECTED,
     NOTE4_BLE_EVENT_PASSKEY,
     NOTE4_BLE_EVENT_PAIRED,
+    NOTE4_BLE_EVENT_ACTIVITY,
 } note4_ble_event_type_t;
 
 typedef struct {

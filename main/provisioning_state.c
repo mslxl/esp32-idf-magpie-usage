@@ -88,6 +88,13 @@ void note4_provisioning_apply(note4_provisioning_snapshot_t *snapshot,
             snapshot->has_staged_config = true;
         }
         break;
+    case NOTE4_PROVISIONING_EVENT_COMMIT_SAVED:
+        if (snapshot->state == NOTE4_PROVISIONING_APPLYING) {
+            snapshot->state = NOTE4_PROVISIONING_CONFIGURING;
+            snapshot->has_committed_config = configured_mask != 0U;
+            snapshot->has_staged_config = false;
+        }
+        break;
     case NOTE4_PROVISIONING_EVENT_COMMIT_FAILED:
         if (snapshot->state == NOTE4_PROVISIONING_APPLYING) {
             snapshot->state = NOTE4_PROVISIONING_CONFIGURING;

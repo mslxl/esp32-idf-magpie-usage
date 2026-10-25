@@ -28,6 +28,7 @@ typedef enum {
     NOTE4_PROVISIONING_EVENT_GOT_IP,
     NOTE4_PROVISIONING_EVENT_CONNECT_FAILED,
     NOTE4_PROVISIONING_EVENT_RETRY,
+    NOTE4_PROVISIONING_EVENT_COMMIT_SAVED,
 } note4_provisioning_event_type_t;
 
 typedef struct {
@@ -43,8 +44,17 @@ typedef struct {
     uint8_t attempted_mask;
     bool has_committed_config;
     bool has_staged_config;
+    bool storage_error;
     bool pairing;
     uint32_t passkey;
+    uint8_t magpie_phase;
+    uint8_t magpie_result;
+    bool magpie_error_page;
+    bool magpie_reading;
+    uint32_t magpie_retry_seconds;
+    char display_timezone[64];
+    uint8_t display_layout;
+    bool adaptive_font;
 } note4_provisioning_snapshot_t;
 
 void note4_provisioning_init(note4_provisioning_snapshot_t *snapshot);

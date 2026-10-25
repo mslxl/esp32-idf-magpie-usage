@@ -60,6 +60,32 @@ note4_screen: PocketJS frame presented in 1bpp mode
 
 Physical appearance of the thresholded text and dialog remains unverified. The new explicit mode-switch API has compiled but has not been exercised on the device; current pages do not invoke it.
 
+## Network/Magpie tabs and explicit setup exit — 2026-10-25
+
+- Host CTest: 4/4 passed, including new bounded Magpie settings, Key modes, malformed payloads, combined settings CRC, legacy Wi-Fi migration, and save-success/save-failure/explicit-exit state transitions.
+- Browser Vitest: 14/14 passed, including SSID/password/endpoint/Key focus retention, tab edit preservation, separate tab submissions, continued editing after saves, exit confirmation and clearing new secrets on device exit.
+- Real Chromium against the running SolidJS app with a simulated GATT peer passed network scan, one-to-five card addition, sparse saved-slot readback, continuous keyboard entry, both tab saves, repeated network save preserving Magpie metadata, browser reconnect reading endpoint/keyPresent, and explicit exit. Screenshots were inspected; no page errors occurred.
+- `just build` completed using ESP-IDF 6.1 and pinned PocketJS. The application binary is `0x259c80` bytes, leaving 41% of the 4 MiB app partition free.
+- This revision has not been flashed. Real BLE saving, migration/persistence across power cycles and device OK exit acceptance remain hardware checks. The tests use synthetic endpoint/Key values and do not contact a Magpie instance. Magpie quota retrieval is not implemented in this revision.
+
+## Web settings ticket #12 — 2026-10-25 follow-up
+
+The current implementation uses Web settings schema 2 and explicit settings encoding with CRC, revision checks and staged COMMIT. Known legacy combined settings preserve Wi-Fi and clear old gateway credentials. Unknown trailing settings extensions survive edits to known fields. Settings and display preferences are written to an inactive chunk bank before switching the manifest. Shrinking a generation reclaims its unused tail; explicit clearing removes both banks. A damaged known manifest is rejected on load but can be replaced by an explicit complete setup save; a failed replacement retains the old pointer. Unknown manifest formats are rejected.
+
+Web validation, firmware validation and display transition rules now derive their supported timezone names from the same generator, pinned to IANA tzdata 2026.2. The Pages workflow watches the generated browser list as well as the web application.
+
+A storage initialization failure now displays a PocketJS `STORAGE UNAVAILABLE` page and waits for OK to retry initialization before starting Wi-Fi/BLE. It preserves NVS. The product-package test verifies the displayed state; the real NVS initialization/retry path still requires fault injection on hardware.
+
+Current automated evidence:
+
+- `just test`: 13/13 native tests passed, including settings migration/extension retention, staged settings state, storage write/commit failures, damaged-manifest replacement, inactive-tail cleanup and explicit clear. The storage fake covers deferred and immediately visible writes/erases; this does not replace actual power-cut testing.
+- Web Vitest: 20/20 tests passed; TypeScript and Vite production build passed.
+- Actual pinned PocketJS package: 18/18 tests, 216 assertions, including the storage failure page, ordinary candidate materialization failure/recovery, pagination, actual font atlas metrics and time formatting.
+- `bun run --cwd provisioning-web test:browser`: real Chromium with synthetic GATT passed empty/saved/sparse five-slot configuration, scan suggestions, continuous typing focus, independent Network/Magpie saves, saved HTTP/interval/timezone/layout/adaptive settings on reconnect, key-presence metadata and explicit setup exit. Screenshots were inspected. The script is checked in; screenshots remain ignored output.
+- `just build`: ESP-IDF 6.1 and pinned PocketJS succeeded. Application size `0x31cba0`; `0xe3460` bytes (22%) remain in the 4 MiB application partition. The existing toolchain warning about `libc_tinystdio_ungetc.c.o` lacking `.note.GNU-stack` remains.
+
+This follow-up has not been flashed. Ticket #12 remains open: real authenticated BLE saving, migration/reboot persistence, NVS power cuts/storage exhaustion and physical setup/exit behavior remain unverified. A simultaneous manifest-write failure and failure restoring the previous pointer reports an error but does not yet establish the ticket's old-generation preservation guarantee. The complete parent feature also still needs TLS adapter integration, atomic snapshot/render resource failures and the planned hardware endurance run. Build success does not establish physical screen correctness.
+
 ## Remaining physical acceptance
 
 The development host did not report a present Bluetooth adapter. These cases remain unverified against a real BLE central and AP:

@@ -105,7 +105,14 @@ static int characteristic_access(uint16_t conn_handle, uint16_t attr_handle,
     s_rx.length += event.frame.payload_length;
     s_rx.next++;
     s_rx.deadline = xTaskGetTickCount() + pdMS_TO_TICKS(5000);
-    if (s_rx.next != s_rx.total) return 0;
+    if (s_rx.next != s_rx.total) {
+        const note4_ble_event_t activity = {.type = NOTE4_BLE_EVENT_ACTIVITY, .conn_handle = conn_handle};
+        if (xQueueSend(s_events, &activity, 0) != pdTRUE) {
+            memset(&s_rx, 0, sizeof(s_rx));
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        return 0;
+    }
     event.frame.sequence = 0U;
     event.frame.total_sequences = 1U;
     event.frame.payload_length = s_rx.length;

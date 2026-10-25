@@ -22,6 +22,13 @@
 static const char *TAG = "note4_screen";
 static QueueHandle_t s_snapshots;
 static QueueHandle_t s_buttons;
+static portMUX_TYPE s_quota_lock = portMUX_INITIALIZER_UNLOCKED;
+static note4_quota_snapshot_t *s_pending_quotas;
+static bool s_quotas_changed;
+static note4_quota_snapshot_t *s_quotas;
+static uint32_t s_quota_version;
+static note4_display_prefs_t *s_pending_prefs, *s_prefs;
+static bool s_prefs_changed;
 static note4_screen_action_handler_t s_action_handler;
 static void *s_action_context;
 
@@ -83,6 +90,100 @@ static JSValue set_display_mode(JSContext *context, JSValueConst self,
     return JS_UNDEFINED;
 }
 
+static JSValue quota_info(JSContext *context, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self; (void)argc; (void)argv;
+    JSValue info = JS_NewObject(context);
+    JS_SetPropertyStr(context, info, "available", JS_NewBool(context, s_quotas != NULL));
+    JS_SetPropertyStr(context, info, "version", JS_NewUint32(context, s_quota_version));
+    JS_SetPropertyStr(context, info, "count", JS_NewFloat64(context, (double)note4_quota_count(s_quotas)));
+    return info;
+}
+
+static JSValue quota_visible(JSContext *context, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    int64_t index;
+    if (argc != 1 || JS_ToInt64(context, &index, argv[0]) < 0) return JS_EXCEPTION;
+    if (index < 0 || (uint64_t)index >= note4_quota_count(s_quotas)) return JS_ThrowRangeError(context, "Unknown quota card");
+    return JS_NewBool(context, note4_display_prefs_visible(s_prefs, s_quotas, (size_t)index));
+}
+
+static JSValue quota_rank(JSContext *context, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    int64_t index;
+    if (argc != 1 || JS_ToInt64(context, &index, argv[0]) < 0) return JS_EXCEPTION;
+    if (index < 0 || (uint64_t)index >= note4_quota_count(s_quotas)) return JS_ThrowRangeError(context, "Unknown quota card");
+    if (s_prefs != NULL && s_prefs->order == 2U) return JS_NewFloat64(context, (double)note4_quota_smart_rank(s_quotas, (size_t)index));
+    const char *provider = note4_quota_text(s_quotas, (size_t)index, "provider");
+    const char *user = note4_quota_text(s_quotas, (size_t)index, "user");
+    size_t rank = note4_display_prefs_rank(s_prefs, provider, user);
+    if (s_prefs != NULL && s_prefs->order == 1U && rank == s_prefs->custom_count) {
+        size_t first = 0U;
+        while (first < (size_t)index && (strcmp(provider, note4_quota_text(s_quotas, first, "provider")) ||
+            strcmp(user, note4_quota_text(s_quotas, first, "user")))) ++first;
+        if (first > SIZE_MAX - rank) return JS_ThrowRangeError(context, "Quota order overflow");
+        rank += first;
+    }
+    return JS_NewFloat64(context, (double)rank);
+}
+
+static JSValue quota_card(JSContext *context, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    int64_t index;
+    if (argc != 1 || JS_ToInt64(context, &index, argv[0]) < 0) return JS_EXCEPTION;
+    if (index < 0 || (uint64_t)index >= note4_quota_count(s_quotas))
+        return JS_ThrowRangeError(context, "Unknown quota card");
+    static const char *const fields[] = {"provider", "user", "name", "alias", "seat", "from", "kind",
+        "plan", "balance", "error", "renew", "asOf", "readAt", "until", "lastServedAt"};
+    JSValue card = JS_NewObject(context);
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        const char *value = note4_quota_text(s_quotas, (size_t)index, fields[i]);
+        if (strcmp(fields[i], "error") == 0 && value[0]) value = "Provider reading failed";
+        if (JS_SetPropertyStr(context, card, fields[i], JS_NewString(context, value)) < 0) goto fail;
+    }
+    if (JS_SetPropertyStr(context, card, "readDeferred", JS_NewBool(context,
+            note4_quota_flag(s_quotas, (size_t)index, "readDeferred"))) < 0) goto fail;
+    JSValue windows = JS_NewArray(context);
+    const size_t length = note4_quota_window_count(s_quotas, (size_t)index);
+    for (size_t w = 0; w < length; ++w) {
+        static const char *const names[] = {"name", "display", "unit", "pool", "holdsWhy", "used", "remaining",
+            "amount", "limit", "resetSecs", "resetsAt", "unlimited"};
+        JSValue window = JS_NewObject(context);
+        for (size_t f = 0; f < sizeof(names) / sizeof(names[0]); ++f) {
+            if (JS_SetPropertyStr(context, window, names[f], JS_NewString(context,
+                    note4_quota_window_text(s_quotas, (size_t)index, w, names[f]))) < 0) {
+                JS_FreeValue(context, window); JS_FreeValue(context, windows); goto fail;
+            }
+        }
+        if (JS_SetPropertyUint32(context, windows, (uint32_t)w, window) < 0) {
+            JS_FreeValue(context, windows); goto fail;
+        }
+    }
+    if (JS_SetPropertyStr(context, card, "windows", windows) < 0) goto fail;
+    JSValue balance = JS_NewArray(context);
+    for (size_t b = 0; b < note4_quota_balance_count(s_quotas, (size_t)index); ++b) {
+        static const char *const names[] = {"label", "text", "percent"};
+        JSValue part = JS_NewObject(context);
+        for (size_t f = 0; f < 3U; ++f) {
+            if (JS_SetPropertyStr(context, part, names[f], JS_NewString(context,
+                    note4_quota_balance_text(s_quotas, (size_t)index, b, names[f]))) < 0) {
+                JS_FreeValue(context, part); JS_FreeValue(context, balance); goto fail;
+            }
+        }
+        const bool failed = note4_quota_balance_text(s_quotas, (size_t)index, b, "error")[0] != 0;
+        if (JS_SetPropertyStr(context, part, "failed", JS_NewBool(context, failed)) < 0) {
+            JS_FreeValue(context, part); JS_FreeValue(context, balance); goto fail;
+        }
+        if (JS_SetPropertyUint32(context, balance, (uint32_t)b, part) < 0) {
+            JS_FreeValue(context, balance); goto fail;
+        }
+    }
+    if (JS_SetPropertyStr(context, card, "balanceSplit", balance) < 0) goto fail;
+    return card;
+fail:
+    JS_FreeValue(context, card);
+    return JS_EXCEPTION;
+}
+
 static esp_err_t install_surface(JSContext *context, void *user_data) {
     (void)user_data;
     JSValue global = JS_GetGlobalObject(context);
@@ -97,6 +198,12 @@ static esp_err_t install_surface(JSContext *context, void *user_data) {
     result |= JS_SetPropertyStr(context, display, "setMode",
                                JS_NewCFunction(context, set_display_mode, "setMode", 1));
     result |= JS_SetPropertyStr(context, note4, "display", display);
+    JSValue quotas = JS_NewObject(context);
+    result |= JS_SetPropertyStr(context, quotas, "info", JS_NewCFunction(context, quota_info, "info", 0));
+    result |= JS_SetPropertyStr(context, quotas, "card", JS_NewCFunction(context, quota_card, "card", 1));
+    result |= JS_SetPropertyStr(context, quotas, "visible", JS_NewCFunction(context, quota_visible, "visible", 1));
+    result |= JS_SetPropertyStr(context, quotas, "rank", JS_NewCFunction(context, quota_rank, "rank", 1));
+    result |= JS_SetPropertyStr(context, note4, "quotas", quotas);
     result |= JS_SetPropertyStr(context, global, "note4", note4);
     JS_FreeValue(context, global);
     return result < 0 ? ESP_FAIL : ESP_OK;
@@ -111,8 +218,17 @@ static esp_err_t update_surface(const note4_provisioning_snapshot_t *snapshot) {
     int result = JS_SetPropertyStr(context, status, "state", JS_NewString(context, state_name(snapshot->state)));
     result |= JS_SetPropertyStr(context, status, "slot", JS_NewInt32(context, snapshot->slot));
     result |= JS_SetPropertyStr(context, status, "round", JS_NewInt32(context, snapshot->round));
+    result |= JS_SetPropertyStr(context, status, "storageError", JS_NewBool(context, snapshot->storage_error));
     result |= JS_SetPropertyStr(context, status, "pairing", JS_NewBool(context, snapshot->pairing));
     result |= JS_SetPropertyStr(context, status, "passkey", JS_NewUint32(context, snapshot->passkey));
+    result |= JS_SetPropertyStr(context, status, "magpiePhase", JS_NewInt32(context, snapshot->magpie_phase));
+    result |= JS_SetPropertyStr(context, status, "magpieResult", JS_NewInt32(context, snapshot->magpie_result));
+    result |= JS_SetPropertyStr(context, status, "magpieErrorPage", JS_NewBool(context, snapshot->magpie_error_page));
+    result |= JS_SetPropertyStr(context, status, "magpieReading", JS_NewBool(context, snapshot->magpie_reading));
+    result |= JS_SetPropertyStr(context, status, "magpieRetrySeconds", JS_NewUint32(context, snapshot->magpie_retry_seconds));
+    result |= JS_SetPropertyStr(context, status, "timezone", JS_NewString(context, snapshot->display_timezone));
+    result |= JS_SetPropertyStr(context, status, "layout", JS_NewString(context, snapshot->display_layout ? "B" : "A"));
+    result |= JS_SetPropertyStr(context, status, "adaptiveFont", JS_NewBool(context, snapshot->adaptive_font));
     result |= JS_SetPropertyStr(context, note4, "status", status);
     JS_FreeValue(context, note4);
     JS_FreeValue(context, global);
@@ -237,6 +353,24 @@ static void screen_task(void *arg) {
         if (xQueueReceive(s_snapshots, &snapshot, 0U) == pdTRUE) {
             ESP_ERROR_CHECK(update_surface(&snapshot));
         }
+        portENTER_CRITICAL(&s_quota_lock);
+        note4_quota_snapshot_t *next_quotas = s_pending_quotas;
+        s_pending_quotas = NULL;
+        const bool quotas_changed = s_quotas_changed;
+        s_quotas_changed = false;
+        note4_display_prefs_t *next_prefs = s_pending_prefs; s_pending_prefs = NULL;
+        const bool prefs_changed = s_prefs_changed; s_prefs_changed = false;
+        portEXIT_CRITICAL(&s_quota_lock);
+        if (quotas_changed) {
+            note4_quota_snapshot_t *previous = s_quotas;
+            s_quotas = next_quotas;
+            ++s_quota_version;
+            note4_quota_snapshot_release(previous);
+        }
+        if (prefs_changed) {
+            note4_display_prefs_t *previous = s_prefs; s_prefs = next_prefs;
+            ++s_quota_version; note4_display_prefs_release(previous);
+        }
         uint32_t buttons = 0U;
         if (previous_buttons == 0U) (void)xQueueReceive(s_buttons, &buttons, 0U);
         previous_buttons = buttons;
@@ -265,6 +399,25 @@ esp_err_t note4_screen_init(note4_screen_action_handler_t handler, void *context
 esp_err_t note4_screen_render(const note4_provisioning_snapshot_t *snapshot) {
     if (snapshot == NULL || s_snapshots == NULL) return ESP_ERR_INVALID_STATE;
     return xQueueOverwrite(s_snapshots, snapshot) == pdTRUE ? ESP_OK : ESP_FAIL;
+}
+
+void note4_screen_publish_quotas(note4_quota_snapshot_t *snapshot) {
+    note4_quota_snapshot_retain(snapshot);
+    portENTER_CRITICAL(&s_quota_lock);
+    note4_quota_snapshot_t *previous = s_pending_quotas;
+    s_pending_quotas = snapshot;
+    s_quotas_changed = true;
+    portEXIT_CRITICAL(&s_quota_lock);
+    note4_quota_snapshot_release(previous);
+}
+
+void note4_screen_publish_prefs(note4_display_prefs_t *prefs) {
+    note4_display_prefs_retain(prefs);
+    portENTER_CRITICAL(&s_quota_lock);
+    note4_display_prefs_t *previous = s_pending_prefs;
+    s_pending_prefs = prefs; s_prefs_changed = true;
+    portEXIT_CRITICAL(&s_quota_lock);
+    note4_display_prefs_release(previous);
 }
 
 void note4_screen_button(note4_button_id_t button) {

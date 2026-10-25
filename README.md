@@ -4,9 +4,11 @@ This repository contains the NOTE4 product firmware and a SolidJS Web Bluetooth 
 
 The refresh policy is **1bpp by default, with explicit 4bpp opt-in**. Mode changes invalidate the PocketJS render target and force a full redraw. In 1bpp, the first frame establishes a full monochrome baseline and subsequent damage can use partial refresh. An opted-in 4bpp update always covers the full panel and starts from a white 1bpp baseline. Returning from 4bpp to 1bpp performs a full 1bpp rebase before partial updates resume. 4bpp partial waveform support is not enabled.
 
-## Wi-Fi setup
+## Device settings
 
 See [the web setup guide](provisioning-web/README.md) for pairing, scanning, ordered network slots and device controls, [the BLE protocol](docs/ble-provisioning.md) for framing and credential handling, and [the validation record](docs/provisioning-validation.md) for verified results and remaining physical acceptance. Start the page with `bun run --cwd provisioning-web dev --host 127.0.0.1`. On NOTE4 v1.0, UP is GPIO39, the front OK button is GPIO0, and the lower side DOWN button is GPIO18. Hold DOWN for 1.2 seconds to enter setup. Pairing, progress, failure/retry and discard pages run in PocketJS; the host handles radio and persistence.
+
+The setup page has **网络** and **Magpie 配置** tabs. Applying saves the active section and stays in settings; explicitly exit through the browser or the device OK confirmation to start Wi-Fi connections. Configure the Magpie management Web address and the Web key from its `?k=` login link. HTTP requires explicit opt-in. The page also saves the reading interval (30–3600 seconds), supported IANA display timezone, A/B layout and adaptive font setting. Only credential-presence flags return to the browser. Upgrading a known legacy gateway configuration preserves Wi-Fi and clears the old Magpie credentials for reconfiguration. Settings use an explicit versioned encoding with CRC and revision checks; invalid data or NVS initialization errors never trigger a partition erase.
 
 ## Pinned provenance
 
@@ -53,16 +55,7 @@ $env:NOTE4_BUILD_DIR = "C:/n4idf"
 just build
 ```
 
-For direct ESP-IDF commands, prepare the pinned package first and use the same explicit build directory:
-
-```powershell
-just package-pinned
-idf.py --project-dir . -B .pocket-build/idf `
-  -DPOCKETJS_NOTE4_PACKAGE=".pocket-build/package/note4-hello.pocket" `
-  set-target esp32s3
-idf.py --project-dir . -B .pocket-build/idf `
-  -DPOCKETJS_NOTE4_PACKAGE=".pocket-build/package/note4-hello.pocket" build
-```
+If a build fails, run `just clean` and then `just build` with the same environment. The recipe prepares the pinned application package, UI atlas and NOTE4 waveform dependencies; running `idf.py build` alone does not replace that workflow.
 
 The individual recipes are `just prepare`, `just test`, `just package-pinned`, `just build`, `just build-package`, `just verify-backup`, `just device-info`, `just flash`, `just monitor`, `just flash-monitor`, and `just clean`. The serial port defaults to `COM5` and can be changed with `NOTE4_PORT`. The backup path defaults to `note4-build/original-flash/note4-com5-original-16MiB.bin`; set `NOTE4_BACKUP` and optionally `NOTE4_BACKUP_SHA256` to use another verified backup.
 

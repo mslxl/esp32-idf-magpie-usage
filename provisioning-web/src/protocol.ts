@@ -11,6 +11,16 @@ export const Opcode = {
   SetSlot: 4,
   Commit: 5,
   Abort: 6,
+  SetMagpie: 7,
+  GetMagpie: 8,
+  ExitSetup: 9,
+  GetWebSettings: 10,
+  SetWebSettings: 11,
+  OpenAccountDirectory: 12,
+  ReadAccountDirectory: 13,
+  BeginDisplayPrefs: 14,
+  PutDisplayPrefsChunk: 15,
+  FinishDisplayPrefs: 16,
   Ack: 0x80,
   Nack: 0x81,
   Status: 0x82,
@@ -21,6 +31,10 @@ export const Opcode = {
   Connected: 0x87,
   ConnectionFailed: 0x88,
   Failure: 0x89,
+  MagpieStatus: 0x8a,
+  WebSettings: 0x8b,
+  AccountDirectory: 0x8c,
+  AccountDirectoryChunk: 0x8d,
 } as const;
 
 export const PasswordMode = {
@@ -165,6 +179,121 @@ export function decodeSetSlotPayload(payload: Uint8Array): SetSlotPayload {
   }
   if (passwordOffset !== payload.length) throw new Error("unexpected password");
   return { ssid, passwordMode: mode };
+}
+
+export const MAX_ENDPOINT_BYTES = 512;
+export const MAX_KEY_BYTES = 256;
+export type MagpieMetadata = { endpoint: string; keyPresent: boolean };
+export type MagpieSettings = MagpieMetadata & { key: string; keyMode: PasswordModeValue };
+
+export function validateEndpoint(endpoint: string): void {
+  if (/[\x00-\x20\x7f]/.test(endpoint) || !/^https?:\/\/[^/?#@\\\s]+(?:\/[^?#@\\\s]*)?$/.test(endpoint)) throw new Error("请输入有效的 http/https Magpie 网关地址，不要包含账号、query 或 fragment");
+  const authority = endpoint.split("/")[2];
+  const match = /^(?:\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::([0-9]+))?$/.exec(authority);
+  if (!match || (match[1] !== undefined && (Number(match[1]) < 1 || Number(match[1]) > 65535))) throw new Error("Magpie 网关主机或端口无效");
+}
+
+export function encodeSetMagpiePayload(value: MagpieSettings, savedEndpoint: string): Uint8Array {
+  const endpoint = encodeUtf8(value.endpoint, MAX_ENDPOINT_BYTES, "endpoint");
+  if (value.endpoint) validateEndpoint(value.endpoint);
+  if (![PasswordMode.Unchanged, PasswordMode.Set, PasswordMode.Clear].includes(value.keyMode)) throw new Error("Key 处理方式无效");
+  if (value.keyMode === PasswordMode.Unchanged && value.endpoint !== savedEndpoint) throw new Error("更换 endpoint 后请重新设置或清除 Key");
+  const key = value.keyMode === PasswordMode.Set ? encodeUtf8(value.key, MAX_KEY_BYTES, "Key") : new Uint8Array();
+  if (value.keyMode === PasswordMode.Set && (!key.length || !/^[\x21-\x7e]+$/.test(value.key))) throw new Error("Key 不能为空或包含空白及控制字符");
+  if (!endpoint.length && (key.length || (value.keyMode === PasswordMode.Unchanged && value.keyPresent))) throw new Error("清空 endpoint 时请同时清除 Key");
+  const payload = new Uint8Array(5 + endpoint.length + key.length);
+  const view = new DataView(payload.buffer);
+  payload[0] = value.keyMode;
+  view.setUint16(1, endpoint.length, true);
+  view.setUint16(3, key.length, true);
+  payload.set(endpoint, 5);
+  payload.set(key, 5 + endpoint.length);
+  return payload;
+}
+
+export function decodeMagpieMetadata(payload: Uint8Array): MagpieMetadata {
+  if (payload.length < 3) throw new Error("invalid Magpie metadata");
+  const length = payload[0] | payload[1] << 8;
+  if (length > MAX_ENDPOINT_BYTES || payload.length !== length + 3 || payload[2] > 1) throw new Error("invalid Magpie metadata length");
+  const endpoint = new TextDecoder("utf-8", { fatal: true }).decode(payload.slice(3));
+  if (endpoint) validateEndpoint(endpoint);
+  return { endpoint, keyPresent: payload[2] !== 0 };
+}
+
+import { SUPPORTED_TIMEZONES } from "../../supported-timezones";
+export { SUPPORTED_TIMEZONES };
+export type WebMetadata = MagpieMetadata & { revision: number; allowPlainHttp: boolean;
+  intervalSeconds: number; timezone: string; layout: "A" | "B"; adaptiveFont: boolean };
+export type WebSettings = WebMetadata & { key: string; keyMode: PasswordModeValue };
+
+export function encodeBegin(revision: number): Uint8Array {
+  if (!Number.isInteger(revision) || revision < 0 || revision > 0xffffffff) throw new Error("无效配置版本");
+  const bytes = new Uint8Array(5);
+  bytes[0] = 2;
+  new DataView(bytes.buffer).setUint32(1, revision, true);
+  return bytes;
+}
+
+function validateWeb(value: WebMetadata): void {
+  encodeBegin(value.revision);
+  if (value.endpoint) validateEndpoint(value.endpoint);
+  if (value.endpoint.startsWith("http://") && !value.allowPlainHttp) throw new Error("使用 HTTP 必须显式允许明文连接");
+  if (!Number.isInteger(value.intervalSeconds) || value.intervalSeconds < 30 || value.intervalSeconds > 3600) throw new Error("读取间隔必须为 30～3600 秒");
+  if (value.timezone && !(SUPPORTED_TIMEZONES as readonly string[]).includes(value.timezone)) throw new Error("设备不支持该 IANA 时区");
+  if (value.layout !== "A" && value.layout !== "B") throw new Error("无效布局");
+}
+
+export function canonicalEndpoint(endpoint: string): string {
+  if (!endpoint) return "";
+  validateEndpoint(endpoint);
+  if (new TextEncoder().encode(endpoint).length > MAX_ENDPOINT_BYTES) throw new Error("Web 地址过长");
+  const parts = /^(https?):\/\/([^/]+)(.*)$/.exec(endpoint)!;
+  const path = parts[3].replace(/\/+$/, "");
+  if (path.includes("%") || path.includes("//") || path.split("/").some((segment) => segment === "." || segment === "..")) throw new Error("Web 地址路径有歧义");
+  const authority = parts[2].toLowerCase().replace(/:([0-9]+)$/, (_, digits: string) => {
+    const port = Number(digits);
+    return port === (parts[1] === "https" ? 443 : 80) ? "" : `:${port}`;
+  });
+  return `${parts[1]}://${authority}${path}`;
+}
+
+export function encodeWebSettings(value: WebSettings, savedEndpoint: string): Uint8Array {
+  validateWeb(value);
+  const normalized = canonicalEndpoint(value.endpoint);
+  const endpoint = encodeUtf8(normalized, MAX_ENDPOINT_BYTES, "Web 地址");
+  const timezone = encodeUtf8(value.timezone, 63, "时区");
+  if (![0, 1, 2].includes(value.keyMode)) throw new Error("无效 Web key 操作");
+  if (value.keyMode === PasswordMode.Unchanged && normalized !== canonicalEndpoint(savedEndpoint)) throw new Error("更换 Web 地址后请重新设置 Web key");
+  const key = value.keyMode === PasswordMode.Set ? encodeUtf8(value.key, 256, "Web key") : new Uint8Array();
+  if (value.keyMode === PasswordMode.Set && (key.length < 16 || !/^[A-Za-z0-9._~-]+$/.test(value.key))) throw new Error("Web key 必须是 16～256 字节的字母、数字或 -._~");
+  if (!endpoint.length && (key.length || (value.keyMode === PasswordMode.Unchanged && value.keyPresent))) throw new Error("清空 Web 地址时请同时清除 Web key");
+  const bytes = new Uint8Array(14 + endpoint.length + key.length + timezone.length);
+  const view = new DataView(bytes.buffer);
+  bytes.set(encodeBegin(value.revision));
+  bytes[5] = value.keyMode;
+  bytes[6] = (value.allowPlainHttp ? 1 : 0) | (value.adaptiveFont ? 2 : 0) | (value.layout === "B" ? 4 : 0);
+  view.setUint16(7, value.intervalSeconds, true);
+  bytes[9] = timezone.length;
+  view.setUint16(10, endpoint.length, true);
+  view.setUint16(12, key.length, true);
+  bytes.set(endpoint, 14);
+  bytes.set(key, 14 + endpoint.length);
+  bytes.set(timezone, 14 + endpoint.length + key.length);
+  return bytes;
+}
+
+export function decodeWebSettings(bytes: Uint8Array): WebMetadata {
+  if (bytes.length < 12 || bytes[0] !== 2 || bytes[5] > 1 || bytes[6] > 7) throw new Error("不支持 Web 设置 schema，请升级固件");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const endpointLength = view.getUint16(10, true), zoneLength = bytes[9];
+  if (endpointLength > 512 || zoneLength > 63 || bytes.length !== 12 + endpointLength + zoneLength) throw new Error("无效 Web 设置长度");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const value: WebMetadata = { revision: view.getUint32(1, true), keyPresent: bytes[5] === 1,
+    allowPlainHttp: Boolean(bytes[6] & 1), adaptiveFont: Boolean(bytes[6] & 2), layout: bytes[6] & 4 ? "B" : "A",
+    intervalSeconds: view.getUint16(7, true), endpoint: decoder.decode(bytes.slice(12, 12 + endpointLength)),
+    timezone: decoder.decode(bytes.slice(12 + endpointLength)) };
+  validateWeb(value);
+  return value;
 }
 
 export function decodeStatusPayload(payload: Uint8Array): DeviceStatus {
