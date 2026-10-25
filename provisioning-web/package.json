@@ -1,0 +1,21 @@
+{
+  "name": "note4-provisioning-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "vite-plugin-solid": "latest",
+    "solid-js": "^1.9.14",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "jsdom": "latest",
+    "typescript": "^5.9.3",
+    "vitest": "latest"
+  }
+}

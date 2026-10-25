@@ -44,6 +44,7 @@ def main() -> None:
         raise SystemExit("PocketJS JavaScript dependencies are missing; run bun install in third_party/pocketjs")
 
     ensure_junction(FRAMEWORK_LINK, POCKETJS)
+    ensure_junction(ROOT / "node_modules" / "solid-js", POCKETJS / "node_modules" / "solid-js")
     ensure_junction(SOLID_LINK, POCKETJS / "node_modules" / "solid-js")
 
     if not PREPARER.exists():

@@ -1,10 +1,10 @@
 {
   "$schema": "https://pocketjs.dev/schema/pocket-2.json",
   "pocket": 2,
-  "id": "dev.note4.pocketjs.hello",
+  "id": "dev.note4.pocketjs.provisioning",
   "name": "note4-hello",
-  "title": "NOTE4 Hello World",
-  "version": "0.1.0",
+  "title": "NOTE4 Wi-Fi Provisioning",
+  "version": "1.0.0",
   "engine": {
     "capabilities": {
       "requires": ["text.glyphs.baked"]

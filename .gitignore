@@ -14,6 +14,7 @@ note4-build/
 **/dependencies.lock
 **/*.pocket
 **/node_modules/
+**/dist/
 **/deps/
 **/__pycache__/
 **/*.pyc

@@ -1,8 +1,12 @@
 # PocketJS NOTE4 Product Firmware
 
-This repository contains the NOTE4 product firmware. It renders a PocketJS `Hello World` scene at 400×300 and presents it on the NOTE4 SSD2683 panel. The display path keeps a persistent RGB565 scene, converts ordinary UI damage to 1bpp, and converts selected grayscale UI regions to 4bpp.
+This repository contains the NOTE4 product firmware and a SolidJS Web Bluetooth Wi-Fi setup page. The 400×300 device screens, pairing code, button actions and discard dialog use PocketJS Solid components and its RGB565 renderer. ESP-IDF NimBLE handles authenticated BLE transport; `esp_wifi` connects to up to five saved 2.4 GHz networks. Device pages default to thresholded 1bpp, including text and dialogs. A page must opt into 4bpp grayscale through `note4.display.setMode("4bpp")`; `note4.display.setMode("1bpp")` restores monochrome. All current provisioning pages use the 1bpp default.
 
-The first supported refresh policy is **1bpp partial refresh plus 4bpp full-screen refresh**. A 4bpp update always covers the full panel. Returning from 4bpp to 1bpp performs a full 1bpp rebase before partial updates resume. 4bpp partial waveform support is not enabled.
+The refresh policy is **1bpp by default, with explicit 4bpp opt-in**. Mode changes invalidate the PocketJS render target and force a full redraw. In 1bpp, the first frame establishes a full monochrome baseline and subsequent damage can use partial refresh. An opted-in 4bpp update always covers the full panel and starts from a white 1bpp baseline. Returning from 4bpp to 1bpp performs a full 1bpp rebase before partial updates resume. 4bpp partial waveform support is not enabled.
+
+## Wi-Fi setup
+
+See [the web setup guide](provisioning-web/README.md) for pairing, scanning, ordered network slots and device controls, [the BLE protocol](docs/ble-provisioning.md) for framing and credential handling, and [the validation record](docs/provisioning-validation.md) for verified results and remaining physical acceptance. Start the page with `bun run --cwd provisioning-web dev --host 127.0.0.1`. On NOTE4 v1.0, UP is GPIO39, the front OK button is GPIO0, and the lower side DOWN button is GPIO18. Hold DOWN for 1.2 seconds to enter setup. Pairing, progress, failure/retry and discard pages run in PocketJS; the host handles radio and persistence.
 
 ## Pinned provenance
 
@@ -82,6 +86,20 @@ just flash-monitor
 Product validation requires the physical panel to show the PocketJS-produced scene. Build success and serial output alone do not establish display correctness. Record serial diagnostics separately from physical-panel acceptance for the supported 1bpp partial, 4bpp full-screen, and 1bpp rebase sequence.
 
 ## Display and power behavior
+
+A future grayscale page can opt in for its lifetime, restoring the default when it unmounts:
+
+```tsx
+import { onCleanup } from "solid-js";
+
+function GrayscalePage() {
+  native.display.setMode("4bpp");
+  onCleanup(() => native.display.setMode("1bpp"));
+  // Return PocketJS components here.
+}
+```
+
+`native` refers to the app's `globalThis.note4` bridge. The mode applies to the full screen, including overlays; gray text pixels alone never enable 4bpp.
 
 - `display_adapter.c` maps RGB565 to 1bpp with an initial luminance threshold of 128 and maps grayscale regions to 4bpp levels 0..15. It does not dither.
 - 1bpp output is 400×300, row-major, MSB-first, and 15,000 bytes. The SSD2683 driver maintains an old-image shadow for transition-based partial refresh.
