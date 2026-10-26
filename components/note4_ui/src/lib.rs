@@ -59,6 +59,7 @@ pub struct Status {
     state: u32, slot: u32, round: u32, storage_error: u32, pairing: u32, passkey: u32,
     phase: u32, result: u32, error_page: u32, reading: u32, retry_seconds: u32,
     layout: u32, adaptive: u32, now: i64, timezone: *const c_char, ble_name: *const c_char,
+    battery_percent: u32, battery_flags: u32,
 }
 impl Status {
     fn zone(&self) -> &str { unsafe { cstr(self.timezone) } }
@@ -337,8 +338,9 @@ impl Ui {
         if !available || !status.quotas() { status::draw(status,canvas); return; }
         canvas.text("Magpie Usage",8,5,18,true);
         let mut number=Text::new(); let _=write!(number,"{} / {}",if self.pages==0 {0}else{page+1},self.pages);
-        canvas.text(number.as_str(),392-measure(number.as_str(),16),7,16,false);
-        canvas.rect(8,33,384,2); canvas.rect(8,269,384,1);
+        let battery_left=status::battery(status,canvas,10);
+        canvas.text(number.as_str(),battery_left-12-measure(number.as_str(),16),7,16,false);
+        canvas.rect(8,33,384,2);
         if status.top()>CARD_TOP {
             canvas.text(if status.state!=5 {"Last data - offline; reconnecting"}else{"Last data - request failed; retrying"},8,36,14,false);
         }
@@ -375,9 +377,6 @@ impl Ui {
                 }
             }
         }
-        canvas.text("UP / DOWN 翻页",8,274,14,false);
-        let setup="长按 DOWN 设置";
-        canvas.text(setup,392-measure(setup,14),274,14,false);
     }
 }
 #[no_mangle]

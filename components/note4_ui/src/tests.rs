@@ -25,7 +25,8 @@ fn source(fixture: &Fixture) -> Source {
 fn status(layout: u32) -> Status {
     Status { state: 5, slot: 0, round: 0, storage_error: 0, pairing: 0, passkey: 0,
         phase: 4, result: 0, error_page: 0, reading: 0, retry_seconds: 0, layout, adaptive: 1,
-        now: 1793016000, timezone: c"Asia/Shanghai".as_ptr(), ble_name: c"magpie-usage-test".as_ptr() }
+        now: 1793016000, timezone: c"Asia/Shanghai".as_ptr(), ble_name: c"magpie-usage-test".as_ptr(),
+        battery_percent: 75, battery_flags: 1 }
 }
 fn arena() -> Box<Ui> {
     unsafe {
@@ -85,6 +86,32 @@ fn compact_cards_have_complete_borders_and_preserve_every_page() {
             assert!((40..60).all(|y|pixels[y*400+8]==0 && pixels[y*400+border_x]==0));
             if layout==1 {assert!((204..392).all(|x|pixels[40*400+x]==0));}
             artifact(&format!("prototype-{}-{page}",if layout==0 {"A"}else{"B"}),&pixels);
+        }
+    }
+}
+
+#[test]
+fn battery_states_update_only_the_header_and_preserve_card_layout() {
+    let model=prototype_fixture();
+    for layout in [0,1] {
+        let mut state=status(layout);let mut ui=arena();
+        assert_eq!(unsafe {note4_ui_build(&mut *ui,&source(&model),&state)},0);
+        let baseline=draw(&ui,&state,0);
+        let mut headers=Vec::new();
+        for (name,percent,flags) in [("empty",0,1),("low",8,1),("half",50,1),("full",100,5),("charging",50,3),("unknown",0,0)] {
+            state.battery_percent=percent;state.battery_flags=flags;
+            let pixels=draw(&ui,&state,0);
+            assert_eq!(&pixels[33*400..],&baseline[33*400..],"battery must not change cards or footer");
+            assert!((363..388).all(|x|pixels[10*400+x]==0),"battery outline");
+            assert!((14..20).all(|y|pixels[y*400+390]==0),"battery terminal");
+            let header=pixels[..33*400].to_vec();
+            assert!(!headers.contains(&header),"each power state must be visually distinct");
+            headers.push(header);
+            artifact(&format!("battery-{}-{name}",if layout==0 {"A"}else{"B"}),&pixels);
+            state.pairing=1;
+            let setup=draw(&ui,&state,0);
+            assert!((363..388).all(|x|setup[24*400+x]==0),"status screens retain battery");
+            state.pairing=0;
         }
     }
 }

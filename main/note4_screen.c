@@ -16,6 +16,7 @@
 #include "ble_provisioning.h"
 #include "magpie_worker.h"
 #include "resource_budget.h"
+#include "battery.h"
 
 static const char *TAG = "note4_screen";
 static QueueHandle_t s_snapshots, s_buttons;
@@ -159,6 +160,8 @@ static esp_err_t create_runtime(void) {
 static void screen_task(void *arg) {
     (void)arg;
     ESP_ERROR_CHECK(create_runtime());
+    note4_battery_init();
+    note4_battery_t shown_battery = {0};
     note4_provisioning_snapshot_t snapshot;
     note4_provisioning_init(&snapshot);
     note4_provisioning_snapshot_t laid_out = snapshot;
@@ -168,6 +171,11 @@ static void screen_task(void *arg) {
     for (;;) {
         if (xQueueReceive(s_snapshots, &snapshot, 0U) == pdTRUE) dirty = true;
         note4_ui_status_t status = ui_status(&snapshot);
+        const note4_battery_t battery = note4_battery_poll(esp_timer_get_time());
+        status.battery_percent = battery.percent;
+        status.battery_flags = (battery.valid ? 1U : 0U) | (battery.charging ? 2U : 0U) | (battery.full ? 4U : 0U);
+        if (battery.valid != shown_battery.valid || battery.charging != shown_battery.charging ||
+            battery.full != shown_battery.full || (battery.valid && battery.percent != shown_battery.percent)) dirty = true;
         const bool top_changed = (laid_out.state != NOTE4_PROVISIONING_CONNECTED || laid_out.magpie_phase == 6U)
             != (snapshot.state != NOTE4_PROVISIONING_CONNECTED || snapshot.magpie_phase == 6U);
         if (top_changed || laid_out.display_layout != snapshot.display_layout ||
@@ -231,6 +239,7 @@ static void screen_task(void *arg) {
         if (accepted) {
             if (rebuild) { note4_ui_t *previous = s_ui; s_ui = s_candidate; s_candidate = previous; }
             page = next_page; laid_out = snapshot; last_minute = status.now / 60;
+            shown_battery = battery;
             dirty = false; layout_dirty = false;
         }
         if (esp_timer_get_time() >= next_diagnostic) {

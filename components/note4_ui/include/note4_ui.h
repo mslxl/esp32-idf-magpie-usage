@@ -21,6 +21,8 @@ typedef struct {
     int64_t now;
     const char *timezone;
     const char *ble_name;
+    /* Flags: bit 0 calibrated reading valid, bit 1 charging, bit 2 full. */
+    uint32_t battery_percent, battery_flags;
 } note4_ui_status_t;
 
 typedef struct note4_ui note4_ui_t;
