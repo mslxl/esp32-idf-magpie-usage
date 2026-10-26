@@ -41,6 +41,10 @@ just monitor
 
 `just flash` builds, verifies the backup and queries the device before writing bootloader, partition table and application. Defaults: `NOTE4_PORT=COM5` and backup `note4-build/original-flash/note4-com5-original-16MiB.bin`. Override with `NOTE4_BACKUP` and optionally `NOTE4_BACKUP_SHA256`.
 
+For repeated USB screenshots during development, run `just flash-dev`, then `just screenshot`. Development output uses a separate `${NOTE4_BUILD_DIR}-dev` directory (override with `NOTE4_DEV_BUILD_DIR`). PNGs and checksum metadata go into `.note4-build/validation/screenshots/`. Close other serial clients before flashing or capturing. See [development screenshots](docs/development-screenshots.md).
+
+`just build` and `just flash` always configure release mode with `NOTE4_DEVELOPMENT=OFF`; a build check rejects screenshot protocol markers or entry points in the ELF/BIN. Development capture code and its USB dependency are excluded from the release component. Run `just flash` to return a development device to release firmware.
+
 The current UI draws black and white only. The presenter converts RGB565 into 15,000-byte MSB-first 1bpp frames, establishes a full baseline, then applies byte-aligned damage updates. The display driver retains independently tested 4bpp conversion/waveform support. GPIO17 holds the board battery latch.
 
 The tracked display driver is derived from NOTE4 reference firmware [`ca285c98ed0641f86780edb1f5ec77b0335fe649`](https://github.com/itopinion/zectrix-note4-epd-demo/tree/ca285c98ed0641f86780edb1f5ec77b0335fe649). Production waveform extraction validates dimensions, analog prefix, hold table and hashes. Font provenance and license are in [assets/fonts](assets/fonts/README.md).

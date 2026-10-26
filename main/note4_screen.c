@@ -17,6 +17,9 @@
 #include "magpie_worker.h"
 #include "resource_budget.h"
 #include "battery.h"
+#ifdef NOTE4_DEV_CAPTURE
+#include "dev_capture.h"
+#endif
 
 static const char *TAG = "note4_screen";
 static QueueHandle_t s_snapshots, s_buttons;
@@ -160,6 +163,9 @@ static esp_err_t create_runtime(void) {
 static void screen_task(void *arg) {
     (void)arg;
     ESP_ERROR_CHECK(create_runtime());
+#ifdef NOTE4_DEV_CAPTURE
+    ESP_ERROR_CHECK(note4_capture_init());
+#endif
     note4_battery_init();
     note4_battery_t shown_battery = {0};
     note4_provisioning_snapshot_t snapshot;
@@ -249,6 +255,11 @@ static void screen_task(void *arg) {
             next_diagnostic = esp_timer_get_time() + 60000000;
         }
         if (err != ESP_OK) { ESP_LOGE(TAG, "Rust render failed: %s", esp_err_to_name(err)); vTaskDelay(pdMS_TO_TICKS(1000)); }
+#ifdef NOTE4_DEV_CAPTURE
+        note4_capture_poll(s_previous_frame, page, note4_ui_pages(s_ui),
+            accepted && s_has_frame && s_quotas != NULL && status.state == NOTE4_PROVISIONING_CONNECTED &&
+            !status.pairing && !status.storage_error && !status.error_page && status.phase != 6U);
+#endif
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

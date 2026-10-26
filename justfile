@@ -4,6 +4,7 @@ repo_root := justfile_directory()
 project := repo_root
 test_project := project + "/tests"
 build_dir := env_var_or_default("NOTE4_BUILD_DIR", project + "/.note4-build/idf")
+dev_build_dir := env_var_or_default("NOTE4_DEV_BUILD_DIR", build_dir + "-dev")
 test_build_dir := test_project + "/build"
 test_config := env_var_or_default("NOTE4_TEST_CONFIG", "Debug")
 port := env_var_or_default("NOTE4_PORT", "COM5")
@@ -25,10 +26,20 @@ test:
     cmake -S {{test_project}} -B {{test_build_dir}}
     cmake --build {{test_build_dir}} --config {{test_config}}
     ctest --test-dir {{test_build_dir}} -C {{test_config}} --output-on-failure
+    python -I {{project}}/tests/test_screenshot_tool.py
 
-# Configure ESP32-S3 and build the native Rust UI firmware.
+# Build release firmware and verify that the screenshot interface is absent.
 build: prepare
-    if ("{{idf_export}}" -eq "") { throw "Set IDF_EXPORT to the ESP-IDF export.ps1 path" }; . "{{idf_export}}" | Out-Null; $env:IDF_TARGET = "esp32s3"; idf.py --project-dir {{project}} -B {{build_dir}} build; exit $LASTEXITCODE
+    if ("{{idf_export}}" -eq "") { throw "Set IDF_EXPORT to the ESP-IDF export.ps1 path" }; . "{{idf_export}}" | Out-Null; $env:IDF_TARGET = "esp32s3"; idf.py --project-dir {{project}} -B {{build_dir}} -DNOTE4_DEVELOPMENT=OFF build; exit $LASTEXITCODE
+    python -I {{project}}/tools/check_release_capture.py {{build_dir}}
+
+# Build development firmware with USB screenshots, in a separate output directory.
+build-dev: prepare
+    if ("{{idf_export}}" -eq "") { throw "Set IDF_EXPORT to the ESP-IDF export.ps1 path" }; . "{{idf_export}}" | Out-Null; $env:IDF_TARGET = "esp32s3"; idf.py --project-dir {{project}} -B {{dev_build_dir}} -DNOTE4_DEVELOPMENT=ON build; exit $LASTEXITCODE
+
+# Capture the currently presented quota page; generated files stay outside Git.
+screenshot:
+    uv run --with pyserial==3.5 python -I {{project}}/tools/note4_screenshot.py --port {{port}}
 
 # Run the native Rust UI checks on the host.
 test-ui: prepare
@@ -47,6 +58,10 @@ device-info:
 flash: build verify-backup device-info
     if ("{{idf_export}}" -eq "") { throw "Set IDF_EXPORT to the ESP-IDF export.ps1 path, for example C:/Users/<user>/esp/esp-idf-v6.1/export.ps1" }; . "{{idf_export}}" | Out-Null; idf.py --project-dir {{project}} -B {{build_dir}} -p {{port}} flash
 
+# Flash development firmware after the same backup and device checks.
+flash-dev: build-dev verify-backup device-info
+    if ("{{idf_export}}" -eq "") { throw "Set IDF_EXPORT to the ESP-IDF export.ps1 path" }; . "{{idf_export}}" | Out-Null; idf.py --project-dir {{project}} -B {{dev_build_dir}} -DNOTE4_DEVELOPMENT=ON -p {{port}} flash
+
 # Open the serial monitor for the selected port using the current build ELF.
 monitor:
     if ("{{idf_export}}" -eq "") { throw "Set IDF_EXPORT to the ESP-IDF export.ps1 path, for example C:/Users/<user>/esp/esp-idf-v6.1/export.ps1" }; . "{{idf_export}}" | Out-Null; idf.py --project-dir {{project}} -B {{build_dir}} -p {{port}} monitor
@@ -54,6 +69,10 @@ monitor:
 # Flash and immediately monitor the selected port after the safety checks.
 flash-monitor: flash
     if ("{{idf_export}}" -eq "") { throw "Set IDF_EXPORT to the ESP-IDF export.ps1 path, for example C:/Users/<user>/esp/esp-idf-v6.1/export.ps1" }; . "{{idf_export}}" | Out-Null; idf.py --project-dir {{project}} -B {{build_dir}} -p {{port}} monitor
+
+# Remove development output after a failed development firmware build.
+clean-dev:
+    if (Test-Path -LiteralPath "{{dev_build_dir}}") { Remove-Item -LiteralPath "{{dev_build_dir}}" -Recurse -Force }
 
 # Remove generated ESP-IDF output for the selected build directory.
 clean:
