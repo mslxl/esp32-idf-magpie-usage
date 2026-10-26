@@ -27,7 +27,7 @@ function inSetup(status: Status): boolean {
 }
 function accessTitle(status: Status): string {
   if (status.magpiePhase !== 6) return "";
-  return ["", "MAGPIE CONFIGURATION REQUIRED", "MAGPIE LOGIN EXPIRED", "ACCESS DENIED", "CERTIFICATE ERROR"][status.magpieResult] || "";
+  return ["", "MAGPIE SETUP REQUIRED", "MAGPIE LOGIN EXPIRED", "ACCESS DENIED", "CERTIFICATE ERROR"][status.magpieResult] || "";
 }
 function title(status: Status): string {
   if (status.storageError) return "STORAGE UNAVAILABLE";
