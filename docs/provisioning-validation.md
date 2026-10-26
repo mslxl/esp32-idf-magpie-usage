@@ -1,4 +1,105 @@
-# Provisioning validation — 2026-10-24
+# NOTE4 validation history
+
+## USB navigation timing — 2026-10-26
+
+A temporary COM5 test firmware accepted only `NAV UP` / `NAV DOWN` and submitted PRESS events through the existing coordinator button queue. Numeric timestamps measured from command recognition on the device to the end of the normal screen render/presentation path. This bypasses physical GPIO debounce and DOWN-release detection, and excludes host-to-device delivery before command recognition. Driver completion includes polling SPI transfers and waiting for display BUSY and power-off completion; it does not establish visible panel quality.
+
+Sixteen actual page transitions succeeded across the live six-card, three-page layout: twelve individually paced transitions, then four commands sent about 120–140 ms apart. No navigation driver errors or fault markers occurred; one initial boot was recorded. Every navigation frame had `ui_ms=0` and one changed region, confirming cached layouts were used. The first live snapshot took about 99 seconds after the boot marker to be published in this run; navigation began only after publication. This startup/network delay is separate from the navigation timings and its cause was not isolated by this test.
+
+| Measurement | Observed |
+| --- | ---: |
+| Eleven individually paced transitions after the first | 1109.214–1127.913 ms total, median 1125.010 ms |
+| Their queue / pre-render wait | 1.522–21.469 ms |
+| Their drawing / damage scan | 64–70 ms |
+| Their panel/presentation stage | 1036–1048 ms |
+| First transition while a preceding status frame was busy | 1610.041 ms total, including 504.560 ms queue / pre-render wait |
+| Four rapid commands, each measured from its own recognition | 1140.416, 2181.161, 3181.252, 4229.274 ms |
+
+The rapid sequence retained FIFO behavior and rendered every intermediate page. The fourth event waited 3073.610 ms before its own 1155.664 ms render. Single-page navigation is therefore about 1.12 seconds under these measured conditions, while rapid input accumulates roughly one presentation per queued event. These results do not measure physical key latency or prove the display looks correct.
+
+Ignored allowlisted evidence: `.note4-build/validation/usb-navigation-20261026.jsonl` and `usb-navigation-20261026.summary.json`. Temporary firmware binary SHA-256 was `f9a683b6b146208c1f48c8012e8d25e725b7071cdf7c896d772556f5eb1814a9`, ELF SHA-256 `f385ff8ea7a05e76aa701f972a6cd6d9cc4642c7e3c20b7dfabf83d265c76602`. Test-only source changes were restored byte-for-byte from their pre-test copies; the diagnostic entry point is not retained in normal source. Protected `just flash` then restored the preceding normal firmware, with matching binary SHA-256 `4f9598c5a3f657152967642d0054fd943ce975b58f340a3d234e5a855cd271b8` and ELF SHA-256 `58a0e3c62012e402cf79a896c20dd7137fd6e248c956349dc6c2f3c45cc7f7a7`. Flash hash verification passed; the original 16 MiB backup hash remained unchanged. Capture and flashing closed COM5 afterward.
+
+## BLE queue and grayscale allocation — 2026-10-26
+
+The BLE event FIFO retains 12 entries and the same inline event format. Its 12,624-byte payload storage now explicitly allocates in PSRAM; `StaticQueue_t` remains in internal BSS. All inspected producers and the coordinator consumer use task-context queue APIs. Queue initialization allocation failure returns `ESP_ERR_NO_MEM`; NimBLE initialization failure deletes the static queue and frees its separate storage. Pairing, encrypted/authenticated writes, MITM and Secure Connections settings are unchanged.
+
+The presenter no longer reserves a 60,000-byte grayscale frame throughout monochrome operation. It allocates the frame in PSRAM before touching the panel, converts it, calls the synchronous driver and releases it on every return path. Black-and-white full and partial presentations allocate no additional drawing buffer. Host presenter coverage includes grayscale allocation failure before panel changes and cleanup after either white-base or grayscale driver failure. CTest passed 14/14, `just build` and protected `just flash` succeeded on the previously confirmed black-and-white NOTE4 v1.0 at COM5. Network/coordinator stacks and Rust UI capacities remain unchanged.
+
+A new 180-second allowlisted COM5 capture passed: one boot, eight TLS connections, seven complete snapshots and seven accepted publications, zero rejected publications and zero fault markers. Compared with the immediately preceding optimization run:
+
+| Metric | First optimization | BLE queue / grayscale optimization |
+| --- | ---: | ---: |
+| Stable worker internal free, last sample | 103,807 B | 116,523 B |
+| Snapshot-stage internal free, minimum | 103,803 B | 116,503 B |
+| Historical internal free minimum | 41,148 B | 53,872 B |
+| Snapshot-stage largest internal block, minimum | 31,744 B | 34,816 B |
+| Historical PSRAM free minimum | 7,212,324 B | 7,260,028 B |
+| Worker minimum stack headroom | 15,292 B | 15,296 B |
+| Nonzero Rust layout time | 202–210 ms | 199–204 ms |
+| Draw/damage time | 45–79 ms | 45–78 ms |
+| Nonempty panel presentation including startup | 851–1428 ms | 840–1429 ms |
+
+Stable internal free increased by 12,716 B (12.4 KiB), while the historical internal minimum increased by 12,724 B and stayed 21,104 B above the 32 KiB reserve. The historical PSRAM minimum improved by 47,704 B (46.6 KiB), reflecting the removed permanent gray frame minus the queue storage now in PSRAM. Remote contents and allocator effects prevent exact per-allocation attribution. Compared with the original Rust baseline, stable internal free is now 58,344 B higher (57.0 KiB).
+
+Snapshot-to-publication delays were 1.378, 1.141, 0.303, 1.925, 1.881, 1.868 and 2.466 seconds; no overall latency improvement is claimed. Five nonempty presentations completed. Some unchanged frames report 1 ms despite zero regions; the panel range above excludes those frames. The comparison JSON's generic nonzero timing range includes them. One generic timeout label occurred, as in prior captures; the label alone does not identify a failed HTTP request.
+
+Flashed firmware: version `1cc962b-dirty`, ESP-IDF `v6.1`, application size `0x15fe80`; binary SHA-256 `4f9598c5a3f657152967642d0054fd943ce975b58f340a3d234e5a855cd271b8`, ELF SHA-256 `58a0e3c62012e402cf79a896c20dd7137fd6e248c956349dc6c2f3c45cc7f7a7`. Runtime ELF prefix matched `58a0e3c62012e402`. Flash write verification passed. The original 16 MiB backup was rehashed after flashing and remains `765D744CB156857BD20468991498E4A5BDC26C348575F789480BD1312FD2F975`. The existing `.note.GNU-stack` linker warning remains.
+
+Ignored evidence: `.note4-build/validation/ram-optimized2-20261026.jsonl` and `ram-optimized2-20261026-comparison.json`. No raw serial/network payloads or credentials were persisted; COM5 was released after capture. Actual authenticated BLE central traffic through the moved FIFO, physical panel appearance, buttons, larger payloads and 24-hour endurance remain unverified. No commit, push or issue modification was performed.
+
+## Internal RAM optimization — 2026-10-26
+
+Quota trees/strings, semantic comparison scratch, smart-order arrays, HTTP buffers and account directory/display preference/storage documents now explicitly allocate in PSRAM on ESP32. Host builds retain libc allocation and the existing failure-injection seam. Allocation checks and these model/document allocations now refer to the same external heap; there is no implicit fallback into internal RAM.
+
+The presenter BW frame and EPD old-frame shadow now reside in PSRAM. Partial refresh converts each tightly packed rectangle into the existing BW frame scratch and synchronously submits it, eliminating the temporary internal patch and unnecessary whole-frame conversion. The driver's 1024-byte DMA scratch remains internal. Network/coordinator stacks and BLE authentication are unchanged.
+
+Validation passed: CTest 14/14 (including injected model/document allocation failures and new presenter coverage), Rust UI 4/4, `just build`, and protected `just flash` on the previously confirmed black-and-white NOTE4 v1.0 at COM5. Presenter tests first failed on internal placement and per-refresh allocation, then passed after the change; they also cover non-byte-aligned rectangles, multiple regions, grayscale-to-BW rebasing, driver errors and construction allocation failures. An initial test expectation incorrectly assumed white unused bits; it was corrected to the adapter's existing zero-padding convention.
+
+Both baseline and optimized captures ran for 180 seconds using existing device settings; the remote six-card contents changed slightly between runs. These are observed comparisons, not exact per-allocation attribution:
+
+| Metric | Rust baseline | Optimized |
+| --- | ---: | ---: |
+| Stable worker internal free, last sample | 58,179 B | 103,807 B |
+| Snapshot-stage internal free, minimum | 37,927 B | 103,803 B |
+| Historical internal free minimum | 26,000 B | 41,148 B |
+| Snapshot-stage largest internal block, minimum | 24,576 B | 31,744 B |
+| Historical PSRAM free minimum | 7,264,048 B | 7,212,324 B |
+| Accepted complete publications | 8 | 7 |
+| Rejected publications / fault markers | 0 / 0 | 0 / 0 |
+| Nonzero Rust layout time | 201–208 ms | 202–210 ms |
+| Draw/damage time | 48–80 ms | 45–79 ms |
+| Nonempty presentation time including startup | 911–1430 ms | 851–1428 ms |
+
+Stable internal free increased by 45,628 B; the snapshot-stage minimum increased by 65,876 B. The optimized internal historical minimum stayed 8,380 B above the 32 KiB candidate reserve. The network stack retained 15,292 B minimum headroom in this run. Seven snapshot-to-publication delays were 1.365, 0.299, 0.300, 0.301, 1.878, 2.444 and 1.884 seconds; some exceed the baseline range, so this establishes memory improvement without claiming overall publication latency improvement. One generic timeout label occurred in each capture; all complete snapshots were accepted, and the label does not identify a failed HTTP request.
+
+Optimized firmware: version `1cc962b-dirty`, ESP-IDF `v6.1`, application size `0x15fe30`; binary SHA-256 `c47c2daa025d2512e1ae848bcfe4c5db8aee7af72a3aa3038b5af176ab719f5f`, ELF SHA-256 `ef9805db51445c7d8be7333ba6dd1b5b1b66b984b77dc8ef64e4cd5affba1d72`. Flash write hashes passed. The original 16 MiB backup remained unchanged at SHA-256 `765D744CB156857BD20468991498E4A5BDC26C348575F789480BD1312FD2F975`. The existing `.note.GNU-stack` linker warning remains.
+
+Ignored evidence: `.note4-build/validation/ram-optimized-20261026.jsonl` and `ram-optimized-20261026-comparison.json`. Capture saved only allowlisted metrics/labels and released COM5 afterward. Physical panel correctness, actual buttons, real authenticated BLE, larger payloads and 24-hour endurance remain separate acceptance checks. No commit, push or issue modification was performed.
+
+## Native Rust UI and dependency removal — 2026-10-26
+
+The current device UI is the fixed-capacity Rust component in `components/note4_ui`; C retains networking, BLE, settings, quota snapshots and EPD presentation. The provisioning browser now uses native TypeScript DOM controls. Device JS/JSX sources, runtime manifests, submodule checkout, package/overlay tooling, obsolete tests and generated runtime component directories were removed. Retired compiler fixture sources were also removed while retaining historical diagnostic logs. Historical entries below describe earlier firmware and do not specify the current dependencies or APIs. Their former `.pocket-build/validation/` artifact directory has moved to `.note4-build/validation/`.
+
+Host checks passed: native CTest 13/13, Rust UI tests 4/4, provisioning browser tests 20/20, TypeScript checking and Vite production build. Real Chromium with a simulated GATT peer passed five-slot editing, sparse saved-slot readback, scan selection, continuous typing/focus, independent tab saves, secret input clearing, settings reconnect and explicit exit, with no page errors. Synthetic Rust pixel output was inspected for single/two-column pages, long-card continuation, unsupported Unicode and authentication status. These checks do not establish real BLE radio behavior or physical panel appearance.
+
+`just build` and the protected `just flash` workflow succeeded on the previously confirmed black-and-white NOTE4 v1.0, COM5. The application is `0x15fe50` bytes, leaving 66% of the 4 MiB app partition free. The full 16 MiB original Flash backup remained unchanged; its SHA-256 is `765D744CB156857BD20468991498E4A5BDC26C348575F789480BD1312FD2F975`. Flash writes passed hash verification. The existing `.note.GNU-stack` linker warning remains.
+
+Firmware identity: version `1cc962b-dirty`, ESP-IDF `v6.1`, ELF prefix `f221f4db5a4cf0ec`. Binary SHA-256: `6fbba2c7f1d6f6474177e47dfad4786a886c4da1cd35ab485b6f159e06383b07`; ELF SHA-256: `f221f4db5a4cf0ec86db4ac88532577aa5859b3edfaf50bb954dca6f997ec3a3`. The dirty version represents the uncommitted migration tree.
+
+A 180-second COM5 capture using the existing saved configuration passed the repeated-publication criterion:
+
+- One initial boot, eight complete native snapshots and eight accepted publications, each with six cards; zero rejected candidates and zero fault markers.
+- Rust layout took 201–208 ms; drawing and damage comparison took 48–80 ms. Nonempty panel presentations took 911–1430 ms, including startup.
+- Snapshot-to-publication delays were 1.434, 1.410, 0.545, 0.512, 0.301, 0.295, 0.302 and 0.282 seconds. This capture did not reproduce the earlier 17–76-second publication stalls. Unchanged frames require no panel refresh.
+- The committed layout reported three pages and 1,829 used layout bytes; this metric excludes the reserved capacity of both fixed arenas.
+- Minimum internal free memory reached 26,000 bytes, below the candidate 32 KiB reserve. Minimum free PSRAM was 7,264,048 bytes. No allocation failure was observed, but combined memory acceptance remains open.
+- One generic `timeout` label was captured; it does not identify a failed HTTP transaction. Nine TLS connections and all eight complete snapshots succeeded.
+
+The ignored allowlisted capture is `.note4-build/validation/rust-runtime-20261026.jsonl`, with a numeric summary beside it. An initial collector launch failed before opening COM5 because of an incorrect Python import path; correcting the path produced the successful capture above. No raw SDK/network logs, response bodies, account strings or credentials were persisted.
+
+No button events occurred during the capture. Actual UP/OK/DOWN latency, physical layout/EPD appearance, real authenticated BLE and 24-hour endurance remain unverified. Short-run success does not establish that every low-memory condition is resolved. No commit, push or issue modification was performed.
+
+## Historical provisioning validation — 2026-10-24
 
 Validation targets the black-and-white NOTE4 v1.0 on COM5 with ESP-IDF 6.1 and pinned PocketJS e27bff3e96df3c7b3c8263a34f2362b964df04fb.
 

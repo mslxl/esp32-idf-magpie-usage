@@ -8,20 +8,20 @@
 
 ```powershell
 $env:IDF_EXPORT = 'C:/Users/mslxl/esp/esp-idf-v6.1/export.ps1'
-$env:NOTE4_BUILD_DIR = 'C:/n4idf-provisioning'
+$env:NOTE4_BUILD_DIR = 'C:/n4idf-rust'
 just build
 just test
 bun run --cwd provisioning-web test
 bun run --cwd provisioning-web build
-bun test ./tests/quota-app.test.ts ./tests/quota-pages.test.ts ./tests/quota-time.test.ts
+just test-ui
 bun run --cwd provisioning-web test:browser
 ```
 
-失败的固件构建先 `just clean`，再 `just build`。固定 PocketJS 在 build 中生成，不调用系统 PocketJS CLI。产物：`.pocket-build/package/` 和所选 NOTE4_BUILD_DIR；自动测试记录见 `docs/provisioning-validation.md`，不同修订的旧结果不可代替本次结果。
+失败的固件构建先 `just clean`，再 `just build`。原生 Rust 字体、图标和时区表在 build 中生成。产物：`.note4-build/native-assets/` 和所选 NOTE4_BUILD_DIR；自动测试记录见 `docs/provisioning-validation.md`，不同修订的旧结果不可代替本次结果。
 
 烧录是单独的人工验收步骤。本轮开发不自动烧录。先肉眼核对板卡丝印/外观确为黑白 NOTE4 v1.0，确认串口 COM5，再执行 `just verify-backup`、`just device-info`。备份必须完整 16 MiB，记录 SHA-256，不能删除、覆盖。确认后才运行 `just flash`。`device-info` 只能验证芯片/Flash，不能识别彩屏型号。
 
-记录 Git commit、工作树是否有改动、启动 `build version/idf/elf`、bin SHA-256、PocketJS pinned SHA、测试日期。固件默认 1bpp。开机、配对、每个布局/错误页分别拍照，照片放忽略目录 `note4-build/acceptance/`。
+记录 Git commit、工作树是否有改动、启动 `build version/idf/elf`、bin SHA-256、Rust toolchain 版本、测试日期。固件默认 1bpp。开机、配对、每个布局/错误页分别拍照，照片放忽略目录 `note4-build/acceptance/`。
 
 ## 合成服务器与故障序列
 
@@ -77,13 +77,12 @@ python -I tools/magpie_fixture.py --bind 0.0.0.0 --port 8787 --prefix /note4 --c
 
 ## 资源预算与24小时记录
 
-当前候选上限：响应含NUL 393216字节，JSON树及索引1572864字节，稳定目录/上传文档各393216字节；PSRAM保留262144字节，internal保留32768字节。旧模型、候选、智能比较临时空间、目录视图、上传/解码、QuickJS及TLS会并存。分配前检查剩余空间和最大块，真正分配失败仍返回错误。无账号条数限制，超字节预算整次失败。QuickJS使用固定PocketJS guest配置，启动后每分钟报告heap_used/heap_limit；字体和渲染缓冲开销包含在实际余量里。
-
+当前候选上限：响应含NUL 393216字节，JSON树及索引1572864字节，稳定目录/上传文档各393216字节；PSRAM保留262144字节，internal保留32768字节。旧模型、候选、智能比较、目录、上传/解码及TLS可能并存。原生Rust UI预分配两个固定arena，单布局最多4096行、262144字节文本、1024个可见卡片；超限整体拒绝，保留旧模型。每分钟报告native_ui pages/page/layout_bytes/cards及资源余量。
 这些是待实测的工程保护值，不是已验收容量。固定预算的最终依据必须补上TLS连接、解析、候选发布、BLE目录和偏好提交组合的最低余量、最大块、任务栈、峰值。当前按域上限及分配时free/largest检查，不是覆盖所有并存对象的统一峰值记账器；预检查和真正分配间也可能发生其他任务分配。host malloc故障模拟不能证明ESP32 internal/TLS分配路径或物理断电。
 
-资源恢复还有已知软件缺口：固定PocketJS的Rust UI/render层存在分配耗尽后abort的路径（`engine/ui-cabi/src/lib.rs`），其`ui_qjs.h`也明确注明Rust分配耗尽不可恢复。当前Solid ErrorBoundary覆盖可抛出的UI更新异常，不能捕获native abort；持续OOM下恢复闭包或boundary重建也可能失败。因此第20项不能按现状记为全部通过，#22还需补齐该依赖的可恢复分配支持及真实组合故障验证。
+原生Rust布局不在更新路径动态分配；容量不足返回失败。启动arena分配、显示presenter、TLS及组合故障恢复仍须实机验证，不能因移除旧运行时就判定OOM已解决。
 
-网络候选仅在页面物化、render/present和协调器版本检查通过后推进目录与智能基线。若物理呈现结束后版本才失效，下一帧恢复旧页面，不能保证正在刷新的面板即时回滚。显示偏好独立切换，guest状态字段不包含在额度页面回滚闭包中。实际故障注入要分别观察模型、目录、基线、偏好、状态和物理屏幕，不能把一次合成JS异常恢复当作整个组合事务的证据。
+网络候选仅在布局、render/present及协调器版本检查通过后推进目录与智能基线。若呈现后版本失效，下一帧恢复旧页面；正在刷新的面板不能即时回滚。显示偏好独立切换，实际故障注入需分别观察模型、目录、基线、偏好、状态和屏幕。
 
 关闭其他串口monitor，从ESP-IDF已加载的Python环境运行（需pyserial）：
 
@@ -98,4 +97,4 @@ python -I tools/note4_endurance.py --summarize note4-build/acceptance/run-01.jso
 
 ## 票据状态
 
-#12–#21 有可测试的软件路径；自动验证结果与两轴审查见 `docs/provisioning-validation.md`。#22 尚有PocketJS native分配耗尽不可恢复的软件缺口，目标机实测预算/组合故障也未完成；#23 的真实BLE/TLS/屏幕/24小时证据必须按本清单补齐。未获得证据的验收项保持待测，不能仅按代码存在关闭票，也不修改父票 #11。
+原生Rust迁移后的自动结果需重新记录。#22的目标机预算与组合故障、#23的真实BLE/TLS/屏幕/24小时证据仍待补齐。未获得证据的验收项保持待测，不因代码存在关闭票，不修改父票 #11。
