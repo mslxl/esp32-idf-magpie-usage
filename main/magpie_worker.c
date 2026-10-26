@@ -145,7 +145,9 @@ esp_err_t note4_magpie_worker_init(note4_magpie_handler_t handler, void *context
     atomic_init(&s_epoch, 0U);
     s_commands = xQueueCreate(1U, sizeof(command_t));
     if (s_commands == NULL) return ESP_ERR_NO_MEM;
-    return xTaskCreate(worker, "magpie_web", 16384U, NULL, 5U, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    /* Settings, HTTP parsing and TLS overflowed the original 16 KiB stack.
+     * Share CPU time with idle during synchronous certificate verification. */
+    return xTaskCreate(worker, "magpie_web", 32768U, NULL, tskIDLE_PRIORITY, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 unsigned note4_magpie_worker_update(const note4_settings_t *settings, note4_poll_mode_t mode) {

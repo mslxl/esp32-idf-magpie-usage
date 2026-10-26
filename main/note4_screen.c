@@ -479,8 +479,9 @@ esp_err_t note4_screen_init(note4_screen_action_handler_t handler, void *context
     s_snapshots = xQueueCreate(1U, sizeof(note4_provisioning_snapshot_t));
     s_buttons = xQueueCreate(8U, sizeof(uint32_t));
     if (s_snapshots == NULL || s_buttons == NULL) return ESP_ERR_NO_MEM;
-    /* This task owns QuickJS/rendering; radio and NVS operations stay on the coordinator. */
-    return xTaskCreateWithCaps(screen_task, "note4_screen", 65536U, NULL, 4, NULL,
+    /* Pagination can exceed one watchdog period; share CPU time with idle.
+     * Radio and NVS operations stay on the higher-priority coordinator. */
+    return xTaskCreateWithCaps(screen_task, "note4_screen", 65536U, NULL, tskIDLE_PRIORITY, NULL,
                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
