@@ -1,4 +1,4 @@
-import { createSignal, ErrorBoundary, For, Show } from "solid-js";
+import { createSignal, ErrorBoundary, Index, Show } from "solid-js";
 import { getOps } from "@pocketjs/framework/host";
 import { quotaLineHeight } from "./quota-fonts";
 import { createBakedFontCoverage } from "./third_party/pocketjs/framework/src/font-coverage";
@@ -29,12 +29,14 @@ function accessTitle(status: Status): string {
   if (status.magpiePhase !== 6) return "";
   return ["", "MAGPIE SETUP REQUIRED", "MAGPIE LOGIN EXPIRED", "ACCESS DENIED", "CERTIFICATE ERROR"][status.magpieResult] || "";
 }
+function quotaError(status: Status): boolean {
+  return status.magpiePhase === 6 && status.magpieErrorPage && ![1, 2, 3, 4].includes(status.magpieResult);
+}
 function title(status: Status): string {
   if (status.storageError) return "STORAGE UNAVAILABLE";
   if (status.pairing) return "BLUETOOTH PAIRING";
   if (!inSetup(status) && accessTitle(status)) return accessTitle(status);
-  if (status.magpieErrorPage && !["configuring", "discard", "applying"].includes(status.state) &&
-      ![1, 2, 3, 4].includes(status.magpieResult)) return "QUOTA READING FAILED";
+  if (quotaError(status) && !["configuring", "discard", "applying"].includes(status.state)) return "QUOTA READING FAILED";
   if (status.state === "connected") {
     if (status.magpiePhase === 1) return "SYNCING CLOCK";
     if (status.magpiePhase === 2) return "MAGPIE SIGN IN";
@@ -63,7 +65,7 @@ function detail(status: Status): string {
   if (!inSetup(status)) {
     if (accessTitle(status)) return ["", "Hold DOWN to configure Magpie Web", "Hold DOWN and save a valid Web key",
       "Magpie refused access. Check server permissions.", "Check certificate, hostname and device time"][status.magpieResult];
-    if (status.magpieErrorPage && status.state !== "connected") return "Offline. Reconnecting to Wi-Fi. Hold DOWN for setup.";
+    if (quotaError(status) && status.state !== "connected") return "Offline. Reconnecting to Wi-Fi. Hold DOWN for setup.";
   }
   if (status.state === "connected") {
     if (status.magpiePhase === 1) return "Setting time before HTTPS verification";
@@ -102,6 +104,7 @@ export default function App() {
   const [page, setPage] = createSignal(0);
   const covered = createBakedFontCoverage();
   let version = -1, minute = -1, timezone = "", layoutKey = "", renderedPage = -1;
+  let retained = new Map<number, QuotaPage>();
   let rollback: (() => void) | undefined;
   let resetRender: (() => void) | undefined;
   native.quotas.settle = accepted => {
@@ -113,19 +116,31 @@ export default function App() {
   };
   const banner = (value: Status) => value.state !== "connected" ? "Last data - offline; reconnecting" : value.magpiePhase === 6
     ? `Last data - ${({ 6: "Magpie timeout", 8: "invalid Magpie reply", 9: "quota memory low", 10: "Magpie rate limit" } as Record<number, string>)[value.magpieResult] || "Magpie request failed"}`
-    : value.magpieReading ? "Magpie Usage - reading" : "";
+    : value.magpieReading ? "Magpie Usage - updating" : "";
   const recovery = (value: Status) => value.state !== "connected" ? "Wi-Fi reconnecting"
     : value.magpiePhase === 6 ? value.magpieRetrySeconds > 0 ? `Retry in ${value.magpieRetrySeconds}s` : "Retrying request"
     : "Waiting for provider readings";
+  const contentTop = (value: Status) => value.state !== "connected" || value.magpiePhase === 6 ? 62 : 38;
   const blocked = () => status().magpiePhase === 6 && [1, 2, 3, 4].includes(status().magpieResult);
-  const showQuotas = () => available() && !status().storageError && !inSetup(status()) && !status().pairing && !blocked() && !status().magpieErrorPage;
+  const showQuotas = () => available() && !status().storageError && !inSetup(status()) && !status().pairing && !blocked() && !quotaError(status());
+  onButtonPress(BTN.UP, () => { if (showQuotas()) setPage(current => Math.max(0, current - 1)); });
+  onButtonPress(BTN.DOWN, () => { if (showQuotas()) setPage(current => Math.min(Math.max(0, pageCount() - 1), current + 1)); });
   onFrame(() => {
     const info = native.quotas.info();
     const next = native.status;
     const now = Date.now();
-    const nextLayoutKey = `${next.layout}:${next.adaptiveFont}:${!!banner(next)}`;
+    const nextLayoutKey = `${next.layout}:${next.adaptiveFont}:${contentTop(next)}`;
     if (info.version !== version || minute !== Math.floor(now / 60000) || timezone !== next.timezone || layoutKey !== nextLayoutKey || page() !== renderedPage) {
       try {
+      const previous = { rows: rows(), filtered: filtered(), count: pageCount(), page: renderedPage < 0 ? page() : renderedPage, available: available(),
+        version, minute, timezone, layoutKey, renderedPage, retained };
+      const cached = info.version === version && minute === Math.floor(now / 60000) && timezone === next.timezone && layoutKey === nextLayoutKey
+        ? retained.get(page()) : undefined;
+      if (cached) {
+        rollback = () => { setRows(previous.rows); setPage(previous.page); renderedPage = previous.renderedPage; };
+        setRows(cached); renderedPage = page();
+        native.quotas.materialized?.(true);
+      } else {
       const indices: { index: number; rank: number }[] = [];
       for (let index = 0; index < info.count; ++index) if (native.quotas.visible(index)) indices.push({ index, rank: native.quotas.rank(index) });
       indices.sort((a, b) => a.rank - b.rank || a.index - b.index);
@@ -134,22 +149,21 @@ export default function App() {
       const result = quotaPage({ length: indices.length, card: index => native.quotas.card(indices[index].index) }, page(),
         (text, slot = 2) => host.measureText(text, slot), (scalar, slot = 2) => covered(scalar, slot),
         host.wrapText ? (text, width, slot = 2) => host.wrapText!(text, slot, width) : undefined, now, next.timezone || "UTC",
-        { layout: next.layout, adaptive: next.adaptiveFont, top: banner(next) ? 62 : 38, lineHeight: quotaLineHeight });
-      const previous = { rows: rows(), filtered: filtered(), count: pageCount(), page: page(), available: available(),
-        version, minute, timezone, layoutKey, renderedPage };
+        { layout: next.layout, adaptive: next.adaptiveFont, top: contentTop(next), lineHeight: quotaLineHeight });
       rollback = () => {
         setRows(previous.rows); setFiltered(previous.filtered); setPageCount(previous.count);
         setPage(previous.page); setAvailable(previous.available);
-        ({ version, minute, timezone, layoutKey, renderedPage } = previous);
+        ({ version, minute, timezone, layoutKey, renderedPage, retained } = previous);
       };
       if (JSON.stringify(result.rows) !== JSON.stringify(rows())) setRows(result.rows);
       setFiltered(nextFiltered);
       setPageCount(result.count);
       setPage(result.index); renderedPage = result.index;
       setAvailable(info.available);
-      version = info.version;
+      version = info.version; retained = result.retained;
       minute = Math.floor(now / 60000); timezone = next.timezone; layoutKey = nextLayoutKey;
       native.quotas.materialized?.(true);
+      }
       } catch {
         native.quotas.materialized?.(false);
         // Keep the last complete page; the native owner rejects the candidate.
@@ -164,8 +178,6 @@ export default function App() {
       setStatus(next);
     }
   });
-  onButtonPress(BTN.UP, () => { if (showQuotas()) setPage(current => Math.max(0, current - 1)); });
-  onButtonPress(BTN.DOWN, () => { if (showQuotas()) setPage(current => Math.min(Math.max(0, pageCount() - 1), current + 1)); });
   onButtonPress(BTN.CIRCLE, () => native.ble.requestAction(3), { allowWhenBlocked: true });
   onButtonPress(BTN.UP | BTN.DOWN, () => {
     if (status().state === "discard") native.ble.requestAction(4);
@@ -202,27 +214,36 @@ export default function App() {
       </Modal>
     </View>}>
       <View class="w-full h-full" style={{ bgColor: "#FFFFFF" }}>
+        <View class="absolute" style={{ insetL:8, insetT:32, width:384, height:1, bgColor:"#000000" }} />
+        <View class="absolute" style={{ insetL:8, insetT:272, width:384, height:1, bgColor:"#000000" }} />
         <Show when={banner(status())} fallback={
           <Text class="absolute text-lg" style={{ insetL: 8, insetT:8, width: 384, height: 24, textColor: "#000000" }}>Magpie Usage</Text>
         }>
           <Text class="absolute text-base" style={{ insetL: 8, insetT:8, width: 384, height: 22, textColor: "#000000" }}>{banner(status())}</Text>
-          <Text class="absolute text-sm" style={{ insetL: 8, insetT:34, width: 384, height: 22, textColor: "#000000" }}>{recovery(status())}</Text>
+          <Show when={contentTop(status()) > 38}>
+            <Text class="absolute text-sm" style={{ insetL: 8, insetT:34, width: 384, height: 22, textColor: "#000000" }}>{recovery(status())}</Text>
+          </Show>
         </Show>
         <Show when={pageCount() > 0} fallback={
           <Text class="absolute text-base" style={{ insetL: 8, insetT:100, width: 384, height: 24, textColor: "#000000" }}>{filtered() ? "No accounts match display settings" : "No accounts"}</Text>
         }>
-          <For each={rows()}>{row => <>
-            <Show when={row.icon}><Image src={providerIcon(row.icon!)} class="absolute"
-              style={{ insetL: row.x, insetT:row.y, width:18, height:18 }} /></Show>
-            <Show when={row.progress !== undefined} fallback={
-              <Text class="absolute text-base" style={{ insetL: row.x + (row.header ? 22 : 0), insetT:row.y,
-                width: row.width - (row.header ? 22 : 0), height: row.height, fontSlot: row.slot, textColor: "#000000" }}>{row.text}</Text>
-            }>
-              <View class="absolute border border-black" style={{ insetL:row.x, insetT:row.y + 2, width:row.width, height:6 }}>
-                <View style={{ width:Math.round((row.width - 2) * (row.progress ?? 0) / 100), height:4, bgColor:"#000000" }} />
+          <Index each={rows()}>{row => <>
+            <Show when={row().icon}><Image src={providerIcon(row().icon!)} class="absolute"
+              style={{ insetL: row().x, insetT:row().y, width:18, height:18 }} /></Show>
+            <Show when={row().progress !== undefined} fallback={<>
+              <Text class="absolute text-base" style={{ insetL: row().x + (row().header ? 22 : 0), insetT:row().y,
+                width: row().width - (row().header ? 22 : 0) - (row().right ? getOps().measureText(row().right!, row().slot) + 8 : 0),
+                height: row().height, fontSlot: row().slot, textColor: "#000000" }}>{row().text}</Text>
+              <Show when={row().right}>
+                <Text class="absolute text-base" style={{ insetL:row().x, insetT:row().y, width:row().width,
+                  height:row().height, fontSlot:row().slot, textAlign:2, textColor:"#000000" }}>{row().right}</Text>
+              </Show>
+            </>}>
+              <View class="absolute border border-black" style={{ insetL:row().x, insetT:row().y + 2, width:row().width, height:6 }}>
+                <View style={{ width:Math.round((row().width - 2) * (row().progress ?? 0) / 100), height:4, bgColor:"#000000" }} />
               </View>
             </Show>
-          </>}</For>
+          </>}</Index>
         </Show>
         <Text class="absolute text-base" style={{ insetL: 8, insetT:274, width: 384, height: 20, textColor: "#000000" }}>
           {`${pageCount() ? page() + 1 : 0} / ${pageCount()}    UP/DOWN: page    Hold DOWN: setup`}

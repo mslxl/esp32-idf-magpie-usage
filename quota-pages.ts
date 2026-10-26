@@ -6,18 +6,25 @@ export type QuotaCard = Record<"provider" | "user" | "name" | "alias" | "seat" |
   windows: QuotaWindow[]; readDeferred?: boolean; balanceSplit?: { label: string; text: string; percent: string; failed: boolean }[];
 };
 export type QuotaRow = { text: string; x: number; y: number; width: number; height: number; slot: number;
-  card: number; header: boolean; icon?: string; progress?: number };
+  card: number; header: boolean; icon?: string; progress?: number; right?: string };
 export type QuotaPage = QuotaRow[];
 type Measure = (text: string, slot?: number) => number;
 export type QuotaLayoutOptions = { layout?: string; adaptive?: boolean; top?: number; lineHeight?: (slot: number) => number };
-type Line = { text: string; header: boolean; slot: number; height: number; icon?: string; progress?: number };
+type Line = { text: string; header: boolean; slot: number; height: number; icon?: string; progress?: number; right?: string };
 
 export type QuotaCards = { length: number; card(index: number): QuotaCard };
+const compact = (value: string) => value.replace(/\s+/g, " ").trim();
+function cardTitle(card: QuotaCard): string {
+  const key = (value: string) => compact(value).toLowerCase().replace(/[ _-]/g, "");
+  return card.name && key(card.name) === key(card.provider) ? compact(card.name) : card.provider;
+}
 // PocketJS supplies the shipped atlas metrics and text measurement. Only pagination lives here.
 function paginate(cards: QuotaCards, requested: number | undefined, measure: Measure, covered: (scalar: string, slot?: number) => boolean,
   wrap?: (text: string, width: number, slot?: number) => number[], now?: number, timezone = "UTC",
-  options: QuotaLayoutOptions = {}): { pages: QuotaPage[]; count: number; splits: number } {
-  const layout = (bodySlot: number): { pages: QuotaPage[]; count: number; splits: number } => {
+  options: QuotaLayoutOptions = {}, retain = false) {
+  const layout = (bodySlot: number) => {
+    const retained = new Map<number, QuotaPage>();
+    let retainedRows = 0;
     const top = options.top ?? 38, bottom = 270, usable = bottom - top;
     const height = (slot: number) => Math.max(1, options.lineHeight?.(slot) ?? 20);
     const printable = (value: string, slot: number) => Array.from(value, scalar => {
@@ -25,12 +32,16 @@ function paginate(cards: QuotaCards, requested: number | undefined, measure: Mea
       return scalar === "\n" ? scalar : cp >= 32 && cp !== 127 && covered(scalar, slot)
         ? scalar : `[U+${cp.toString(16).toUpperCase().padStart(4, "0")}]`;
     }).join("");
+    const lineCache = new Map<string, Line[]>();
     const lines = (value: string, width: number, slot: number, header = false): Line[] => {
+      const key = `${slot}:${width}:${header}:${value}`;
+      const cached = lineCache.get(key);
+      if (cached) return cached.map(row => ({ ...row }));
       const result: Line[] = [];
       for (const paragraph of printable(value, slot).split("\n")) {
         const breaks = wrap?.(paragraph, width, slot) ?? [];
         const append = (text: string) => result.push({ text, header, slot, height: height(slot) });
-        if (breaks.length) {
+        if (wrap) {
           let start = 0;
           for (const end of [...breaks, paragraph.length]) {
             if (end > start) append(paragraph.slice(start, end));
@@ -45,6 +56,7 @@ function paginate(cards: QuotaCards, requested: number | undefined, measure: Mea
           append(line);
         }
       }
+      if (lineCache.size < 256) lineCache.set(key, result.map(row => ({ ...row })));
       return result;
     };
     const sum = (rows: Line[]) => rows.reduce((value, row) => value + row.height, 0);
@@ -52,22 +64,36 @@ function paginate(cards: QuotaCards, requested: number | undefined, measure: Mea
       const blocks: Line[][] = [];
       const add = (text: string) => blocks.push(lines(text, width, bodySlot));
       if (heading) {
-        const title = lines(card.provider, width - 22, 2, true);
+        const title = lines(cardTitle(card), width - 22, 2, true);
         if (title.length > 2) { blocks.push(lines(`Account ${index + 1}${continued ? " (continued)" : ""}`, width - 22, 2, true)); add(card.provider); }
         else { if (continued) title.push(...lines("(continued)", width - 22, 2, true)); blocks.push(title); }
         blocks[0][0].icon = card.provider;
         blocks[0][0].height = Math.max(18, blocks[0][0].height);
       }
-      for (const [label, value] of [["Account", card.user], ["Name", card.name], ["Alias", card.alias],
-        ["Seat", card.seat], ["From", card.from], ["Kind", card.kind], ["Plan", card.plan],
-        ["Balance", card.balance], ["Until", card.until ? now === undefined ? card.until : absoluteTime(card.until, now, timezone) : ""], ["Renew", card.renew],
-        ["Read", now === undefined ? card.asOf || card.readAt : readingTime(card, now)]] as const) if (value) add(`${label}: ${value}`);
+      const identity = new Set([compact(card.provider).toLowerCase(), compact(cardTitle(card)).toLowerCase()]);
+      const account = compact(card.user);
+      const plan = compact(card.plan);
+      const combined = account && !/^(api[ _-]?key|token)$/i.test(account) && plan && !identity.has(plan.toLowerCase()) &&
+        measure(`${account}  ${plan}`, bodySlot) <= width;
+      if (combined) { add(`${account}  ${plan}`); identity.add(account.toLowerCase()); identity.add(plan.toLowerCase()); }
+      for (const [label, raw] of [["Account", card.user], ["Name", card.name], ["Alias", card.alias],
+        ["Seat", card.seat], ["From", card.from], ["Kind", card.kind], ["Plan", card.plan]] as const) {
+        const value = compact(raw), key = value.toLowerCase();
+        if (!value || identity.has(key) || label === "Account" && /^(api[ _-]?key|token)$/i.test(value)) continue;
+        identity.add(key);
+        add(label === "Name" ? value : `${label}: ${value}`);
+      }
+      for (const [label, value] of [["Balance", card.balance],
+        ["Until", card.until ? now === undefined ? card.until : absoluteTime(card.until, now, timezone) : ""], ["Renew", card.renew],
+        ["Read", card.asOf || card.readAt ? now === undefined ? card.asOf || card.readAt : readingTime(card, now) : ""]] as const)
+        if (value) add(`${label}: ${value}`);
       for (const part of card.balanceSplit ?? []) add(`${part.label || "Balance part"}: ${part.text}${part.failed ? " (unavailable)" : ""}`);
       if (card.error) add("Provider reading failed; showing available values");
       for (const window of card.windows) {
         const block: Line[] = [];
         const row = (value: string) => block.push(...lines(value, width, bodySlot));
-        row(window.name || "Quota window");
+        const name = window.name || "Quota window";
+        row(name);
         if (window.display) row(window.display);
         const reset = parseInstant(window.resetsAt || "");
         const expired = now !== undefined && reset !== null && reset <= now && !!(card.asOf || card.readDeferred || card.error);
@@ -81,6 +107,11 @@ function paginate(cards: QuotaCards, requested: number | undefined, measure: Mea
           if (window.used !== undefined && window.used !== "" && Number.isFinite(percentage))
             block.push({ text: "", header: false, slot: bodySlot, height: 10, progress: Math.max(0, Math.min(100, percentage)) });
         }
+        if (!window.display && block.length >= 2 && !block[0].progress && block[1].text &&
+            measure(`${block[0].text}  ${block[1].text}`, bodySlot) <= width && block[0].text === name) {
+          block[0].right = block[1].text;
+          block.splice(1, 1);
+        }
         if (window.amount || window.limit) row(`Amount: ${window.amount || "?"} / ${window.limit || "?"}${window.unit ? ` ${window.unit}` : ""}`);
         if (window.pool) row(`Pool: ${window.pool}`);
         if (window.holdsWhy) row(`Hold: ${window.holdsWhy}`);
@@ -93,7 +124,12 @@ function paginate(cards: QuotaCards, requested: number | undefined, measure: Mea
     const pages: QuotaPage[] = [];
     let page: QuotaPage = [], count = 0, y = top, column = 0, previousProvider = "", splits = 0;
     const flush = () => {
-      if (page.length) { if (requested === undefined || requested === count) pages.push(page); ++count; }
+      if (page.length) {
+        if (requested === undefined || requested === count) pages.push(page);
+        // Bound retained layout memory independently of the server's account count.
+        if (retain && retainedRows + page.length <= 1024) { retained.set(count, page); retainedRows += page.length; }
+        ++count;
+      }
       page = []; y = top; column = 0; previousProvider = "";
     };
     const nextColumn = () => {
@@ -150,7 +186,7 @@ function paginate(cards: QuotaCards, requested: number | undefined, measure: Mea
       }
       flush();
     }
-    flush(); return { pages, count, splits };
+    flush(); return { pages, count, splits, retained };
   };
   let best = layout(2);
   if (options.adaptive) for (const slot of [21, 1]) {
@@ -166,9 +202,9 @@ export function quotaPages(cards: QuotaCard[], measure: Measure, covered: (scala
 }
 
 export function quotaPage(cards: QuotaCards, requested: number, measure: Measure, covered: (scalar: string, slot?: number) => boolean,
-  wrap?: (text: string, width: number, slot?: number) => number[], now?: number, timezone = "UTC", options: QuotaLayoutOptions = {}): { rows: QuotaPage; count: number; index: number } {
-  let result = paginate(cards, requested, measure, covered, wrap, now, timezone, options);
+  wrap?: (text: string, width: number, slot?: number) => number[], now?: number, timezone = "UTC", options: QuotaLayoutOptions = {}) {
+  let result = paginate(cards, requested, measure, covered, wrap, now, timezone, options, true);
   const index = Math.max(0, Math.min(requested, result.count - 1));
-  if (requested !== index) result = paginate(cards, index, measure, covered, wrap, now, timezone, options);
-  return { rows: result.pages[0] ?? [], count: result.count, index };
+  if (requested !== index && !result.retained.has(index)) result = paginate(cards, index, measure, covered, wrap, now, timezone, options, true);
+  return { rows: result.retained.get(index) ?? result.pages[0] ?? [], count: result.count, index, retained: result.retained };
 }

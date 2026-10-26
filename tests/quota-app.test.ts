@@ -19,7 +19,11 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
     for (let index = 0; index < view.getUint16(6, true); ++index) glyphs.set(view.getUint32(16 + index * 8, true), blob.data[22 + index * 8]);
     advances.set(blob.data[12], glyphs);
   }
-  const measure = (text: string, slot = 2) => Array.from(text).reduce((width, scalar) => width + (advances.get(slot)?.get(scalar.codePointAt(0)!) ?? 8), 0);
+  const calls = { measure: 0, card: 0 };
+  const measure = (text: string, slot = 2) => {
+    ++calls.measure;
+    return Array.from(text).reduce((width, scalar) => width + (advances.get(slot)?.get(scalar.codePointAt(0)!) ?? 8), 0);
+  };
   const nodes = new Map<number, Node>([[1, { text: "", children: [] }]]);
   let serial = 1, version = 1, available = true;
   let hidden: string[] = [];
@@ -51,7 +55,10 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
       if (textFailure) { textFailure = false; throw new Error("synthetic UI allocation failure"); }
       nodes.get(id)!.text = text;
     },
-    replaceText: (id: number, text: string) => { nodes.get(id)!.text = text; },
+    replaceText: (id: number, text: string) => {
+      if (textFailure) { textFailure = false; throw new Error("synthetic UI allocation failure"); }
+      nodes.get(id)!.text = text;
+    },
     uploadTexture: () => 0, setImage: noop, setSprite: noop, animate: () => 1, cancelAnim: noop,
     setFocus: noop, measureText: measure,
   };
@@ -60,7 +67,7 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
   let clock = initialTime;
   class DeviceDate extends Date { static now() { return clock; } }
   const context = createContext({ ui, console, Date: DeviceDate, __pak: pack.buffer.slice(pack.byteOffset, pack.byteOffset + pack.byteLength),
-    note4: { get status() { return { ...status }; }, quotas: { materialized: (accepted: boolean) => { materialized = accepted; }, info: () => ({ version, available, count: cards.length }), card: (i: number) => { if (cardFailure) throw new Error("synthetic allocation failure"); return cards[i]; }, visible: (i: number) => !hidden.includes(cards[i].provider), rank: (i: number) => ranks[i] ?? 0 },
+    note4: { get status() { return { ...status }; }, quotas: { materialized: (accepted: boolean) => { materialized = accepted; }, info: () => ({ version, available, count: cards.length }), card: (i: number) => { ++calls.card; if (cardFailure) throw new Error("synthetic allocation failure"); return cards[i]; }, visible: (i: number) => !hidden.includes(cards[i].provider), rank: (i: number) => ranks[i] ?? 0 },
       ble: { name: "test", requestAction: noop }, display: { setMode: noop } } });
   runInContext(readFileSync(new URL("../.pocket-build/package/note4-hello.js", import.meta.url), "utf8"), context);
   const frame = (buttons = 0) => runInContext(`frame(${buttons}, 0)`, context);
@@ -71,7 +78,7 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
     const style = { ...inherited, ...node.style };
     return [{ ...node, style }, ...node.children.flatMap(child => styledNodes(child, style))];
   };
-  return { frame, text: () => textAt(1).filter(Boolean), status, nodes: styledNodes, measure,
+  return { frame, text: () => textAt(1).filter(Boolean), status, nodes: styledNodes, measure, calls,
     materialized: () => materialized,
     hide(providers: string[]) { hidden = providers; ++version; frame(); },
     advance(milliseconds: number) { clock += milliseconds; frame(); },
@@ -84,6 +91,49 @@ function device(cards: QuotaCard[], initialTime = Date.UTC(2026, 9, 25, 12)) {
 const card = (provider: string, windows: QuotaCard["windows"] = []): QuotaCard => ({
   provider, user: "", name: "", alias: "", seat: "", from: "", kind: "", plan: "", balance: "", error: "",
   renew: "", asOf: "", readAt: "", until: "", lastServedAt: "", windows,
+});
+
+test("page turns reuse layout and display the next page in the button frame", () => {
+  const app = device([card("Codex", Array.from({ length: 30 }, (_, i) => ({ name: `window ${i}`, used: "10" })))]);
+  app.settle(true);
+  app.status.magpieReading = true; app.status.magpiePhase = 4;
+  app.frame(); app.settle(true);
+  const before = { ...app.calls };
+  app.status.magpieReading = false; app.frame(); app.settle(true);
+  app.status.magpieReading = true; app.frame(); app.settle(true);
+  expect(app.calls.card).toBe(before.card);
+  expect(app.text().join(" ")).not.toContain("Waiting for provider");
+  const footer = () => app.text().find(text => text.includes("UP/DOWN"));
+  expect(app.text()).toContain("window 0");
+  app.frame(0x40);
+  expect(footer()?.startsWith("2 / ")).toBe(true);
+  expect(app.text()).not.toContain("window 0");
+  expect(app.text()).toContain("Codex (continued)");
+  app.frame(0);
+  expect(app.calls.card - before.card).toBe(0);
+  expect(app.calls.measure - before.measure).toBeLessThan(100);
+  app.frame(0x10);
+  expect(footer()?.startsWith("1 / ")).toBe(true);
+  expect(app.text()).toContain("window 0");
+  expect(app.calls.card - before.card).toBe(0);
+});
+
+test("rejected page turns restore cached rows and accepted updates replace cached pages", () => {
+  const windows = Array.from({ length: 20 }, (_, i) => ({ name: `window ${i}`, used: "10" }));
+  const app = device([card("Codex", windows)]);
+  app.settle(true);
+  const previous = app.text();
+  app.frame(0x40); app.settle(false);
+  expect(app.text()).toEqual(previous);
+  app.frame(0); app.frame(0x40); app.settle(true);
+  expect(app.text()).toContain("Codex (continued)");
+  app.frame(0);
+  app.update([card("Claude", windows)]); app.settle(false);
+  expect(app.text()).toContain("Codex (continued)");
+  app.update([card("DeepSeek", windows)]); app.settle(true);
+  app.frame(0x10);
+  expect(app.text()).toContain("DeepSeek");
+  expect(app.text().join(" ")).not.toContain("Codex");
 });
 
 test("storage initialization failure shows a recovery page without old quotas", () => {
@@ -223,6 +273,13 @@ test("offline keeps the current quota page until the error deadline and preserve
   app.status.magpieResult = 2; app.frame();
   expect(app.text()).toContain("MAGPIE LOGIN EXPIRED");
   expect(app.text()).toContain("Hold DOWN and save a valid Web key");
+  app.status.state = "connected"; app.status.magpiePhase = 2; app.status.magpieResult = 5; app.frame();
+  expect(app.text()).not.toContain("QUOTA READING FAILED");
+  expect(app.text()).toContain("Codex (continued)");
+  app.status.magpiePhase = 6; app.frame();
+  expect(app.text()).toContain("QUOTA READING FAILED");
+  expect(app.text()).toContain("Magpie connection failed");
+  expect(app.text()).not.toContain("MAGPIE REQUEST FAILED");
 });
 
 test("temporary read failure retains the last page and setup takes over the screen", () => {

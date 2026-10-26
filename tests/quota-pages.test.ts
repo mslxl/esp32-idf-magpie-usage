@@ -6,6 +6,27 @@ const card = (provider: string, windows: QuotaCard["windows"] = []): QuotaCard =
   provider, user: "", name: "", alias: "", seat: "", from: "", kind: "", plan: "", balance: "",
   error: "", renew: "", asOf: "", readAt: "", until: "", lastServedAt: "", windows,
 });
+test("compact cards omit generic identity and repeated plan metadata", () => {
+  const account = { ...card("opencode-zen-free"), user: "API Key", name: "OpenCode Zen\nFree", plan: "OpenCode Zen\nFree" };
+  const rows = quotaPages([account, card("Codex", [{ name: "5h", used: "30" }])], measure, () => true,
+    undefined, Date.UTC(2026, 9, 26), "UTC").flat();
+  const text = rows.flatMap(row => [row.text, row.right ?? ""]);
+  expect(text).not.toContain("Account: API Key");
+  expect(text.join(" ")).not.toContain("读取时间未知");
+  expect(text.join(" ")).not.toContain("Plan: OpenCode Zen");
+  expect(text).toContain("OpenCode Zen Free");
+  expect(text).toContain("No quota windows");
+  expect(text).toContain("Used: 30%");
+});
+
+test("native wrapping needs no per-character measurement when no break is needed", () => {
+  let measures = 0;
+  const pages = quotaPages([card("Codex")], text => { ++measures; return measure(text); },
+    () => true, () => []);
+  expect(pages[0].map(row => row.text)).toContain("No quota windows");
+  expect(measures).toBe(0);
+});
+
 test("materializes one requested page while reading cards one at a time", () => {
   const cards = Array.from({ length: 100 }, (_, i) => card(`Provider ${i}`, [{ name: "5h", used: "10" }]));
   const expected = quotaPages(cards, measure, () => true);
@@ -18,7 +39,7 @@ test("materializes one requested page while reading cards one at a time", () => 
 test("packs different providers on one page and retains every duplicate window", () => {
   const pages = quotaPages([card("Codex", [{ name: "5h", used: "0" }, { name: "5h", used: "110" }]), card("Claude")], measure, () => true);
   expect(pages.length).toBe(1);
-  const lines = pages.flat().map(row => row.text);
+  const lines = pages.flat().flatMap(row => [row.text, row.right ?? ""]);
   expect(lines).toContain("Codex");
   expect(lines).toContain("Claude");
   expect(lines).toContain("Used: 0%");
@@ -55,7 +76,7 @@ test("continues large cards without losing windows or missing glyphs", () => {
   const account = card("厂商", Array.from({ length: 30 }, (_, i) => ({ name: `window ${i}`, unlimited: i === 0 ? "true" : "", used: "" })));
   const pages = quotaPages([account], measure, scalar => scalar.codePointAt(0)! < 128);
   expect(pages.length).toBeGreaterThan(1);
-  const lines = pages.flat().map(row => row.text);
+  const lines = pages.flat().flatMap(row => [row.text, row.right ?? ""]);
   expect(lines.some(text => text.includes("[U+5382]"))).toBe(true);
   for (let i = 0; i < 30; i++) expect(lines).toContain(`window ${i}`);
   expect(lines).toContain("Unlimited");
