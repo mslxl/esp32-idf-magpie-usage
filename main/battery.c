@@ -1,11 +1,15 @@
 #include "battery.h"
 
+#include <stdatomic.h>
+
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
+#define NOTE4_POWER_LED_GPIO GPIO_NUM_3
 #define NOTE4_CHARGE_GPIO GPIO_NUM_2
 #define NOTE4_FULL_GPIO GPIO_NUM_1
 #define NOTE4_BATTERY_CHANNEL ADC_CHANNEL_3
@@ -16,7 +20,38 @@ static bool s_charge_available;
 static note4_battery_t s_battery;
 static int64_t s_next_sample, s_next_voltage;
 static int s_filtered_mv;
-static unsigned s_pin_state, s_stable_samples;
+static atomic_uint s_power_state;
+static esp_timer_handle_t s_power_timer;
+static bool s_led_available;
+
+/* The timer owns GPIO sampling and LED writes, independently of EPD/network work. */
+static void power_tick(void *context) {
+    (void)context;
+    static unsigned candidate, stable_samples, blink_ticks;
+    static bool led_on;
+    const unsigned pins = (gpio_get_level(NOTE4_CHARGE_GPIO) == 0 ? 1U : 0U)
+        | (gpio_get_level(NOTE4_FULL_GPIO) != 0 ? 2U : 0U);
+    if (pins != candidate) { candidate = pins; stable_samples = 0U; }
+    if (stable_samples < 3U) ++stable_samples;
+    unsigned state = atomic_load(&s_power_state);
+    const bool changed = stable_samples >= 3U && pins != state;
+    if (changed) {
+        state = pins;
+        atomic_store(&s_power_state, state);
+        blink_ticks = 0U;
+        ESP_LOGI("note4_battery", "power present=%u charging=%u full=%u led_mode=%u",
+            state != 0U, state == 1U, state == 2U, state == 1U ? 2U : state != 0U ? 1U : 0U);
+    }
+    bool on = state != 0U;
+    if (state == 1U) {
+        if (!changed && ++blink_ticks >= 10U) blink_ticks = 0U;
+        on = blink_ticks < 5U;
+    }
+    if (s_led_available && on != led_on) {
+        gpio_set_level(NOTE4_POWER_LED_GPIO, on ? 0 : 1);
+        led_on = on;
+    }
+}
 
 void note4_battery_init(void) {
     /* NOTE4 reference ca285c9: ADC1 channel 3, 2:1 divider, active-low
@@ -28,6 +63,23 @@ void note4_battery_init(void) {
         .intr_type = GPIO_INTR_DISABLE,
     };
     s_charge_available = gpio_config(&pins) == ESP_OK;
+    gpio_hold_dis(NOTE4_POWER_LED_GPIO);
+    gpio_set_level(NOTE4_POWER_LED_GPIO, 1);
+    const gpio_config_t led = {
+        .pin_bit_mask = 1ULL << NOTE4_POWER_LED_GPIO, .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    s_led_available = gpio_config(&led) == ESP_OK;
+    if (!s_led_available) ESP_LOGW("note4_battery", "power LED unavailable");
+    if (s_charge_available) {
+        const esp_timer_create_args_t timer = {
+            .callback = power_tick, .name = "note4_power", .skip_unhandled_events = true,
+        };
+        esp_err_t timer_err = esp_timer_create(&timer, &s_power_timer);
+        if (timer_err == ESP_OK) timer_err = esp_timer_start_periodic(s_power_timer, 100000);
+        if (timer_err != ESP_OK) ESP_LOGW("note4_battery", "power status timer unavailable: %s", esp_err_to_name(timer_err));
+    }
     const adc_oneshot_unit_init_cfg_t unit = {.unit_id = ADC_UNIT_1};
     esp_err_t err = adc_oneshot_new_unit(&unit, &s_adc);
     if (err == ESP_OK) {
@@ -50,17 +102,11 @@ void note4_battery_init(void) {
 }
 
 note4_battery_t note4_battery_poll(int64_t now_us) {
-    if (now_us < s_next_sample) return s_battery;
-    s_next_sample = now_us + 5000000;
-    bool charging = false, full = false;
-    if (s_charge_available) {
-        const unsigned state = (gpio_get_level(NOTE4_CHARGE_GPIO) == 0 ? 1U : 0U)
-            | (gpio_get_level(NOTE4_FULL_GPIO) != 0 ? 2U : 0U);
-        if (state != s_pin_state) { s_pin_state = state; s_stable_samples = 0U; }
-        if (s_stable_samples < 3U) ++s_stable_samples;
-        if (s_stable_samples >= 3U) { charging = state == 1U; full = state == 2U; }
-    }
+    const unsigned state = atomic_load(&s_power_state);
+    const bool charging = state == 1U, full = state == 2U;
     const bool power_changed = s_battery.charging != charging || s_battery.full != full;
+    if (now_us < s_next_sample && !power_changed) return s_battery;
+    s_next_sample = now_us + 5000000;
     s_battery.charging = charging;
     s_battery.full = full;
     if (now_us < s_next_voltage && !power_changed) return s_battery;
