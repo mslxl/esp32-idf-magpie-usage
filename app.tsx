@@ -44,7 +44,7 @@ function title(status: Status): string {
       if (status.magpieResult === 2) return "MAGPIE LOGIN EXPIRED";
       if (status.magpieResult === 3) return "ACCESS DENIED";
       if (status.magpieResult === 4) return "CERTIFICATE ERROR";
-      return "MAGPIE CONNECTION ERROR";
+      return "MAGPIE REQUEST FAILED";
     }
   }
   switch (status.state) {
@@ -70,14 +70,17 @@ function detail(status: Status): string {
     if (status.magpiePhase === 2) return "Signing in to Magpie Web";
     if (status.magpiePhase === 3) return "Signed in. No quota reading received yet.";
     if (status.magpiePhase === 6) {
+      if (status.magpieResult === 6) return "Magpie request timed out";
+      if (status.magpieResult === 8) return "Invalid Magpie response";
+      if (status.magpieResult === 9) return "Quota update: low memory";
+      if (status.magpieResult === 10) return "Magpie rate limit reached";
       if (status.magpieErrorPage && ![1, 2, 3, 4].includes(status.magpieResult))
-        return `Reading unavailable. Retry in ${status.magpieRetrySeconds}s. Hold DOWN for setup.`;
+        return "Magpie connection failed";
       if (status.magpieResult === 1) return "Hold DOWN to configure Magpie Web";
       if (status.magpieResult === 2) return "Hold DOWN and save a valid Web key";
       if (status.magpieResult === 3) return "Magpie refused access. Check server permissions.";
       if (status.magpieResult === 4) return "Check certificate, hostname and device time";
-      if (status.magpieResult === 6) return "Request timed out. Hold DOWN for setup.";
-      return "Could not connect. Hold DOWN for setup.";
+      return "Magpie connection failed";
     }
   }
   switch (status.state) {
@@ -109,7 +112,7 @@ export default function App() {
     reset?.();
   };
   const banner = (value: Status) => value.state !== "connected" ? "Last data - offline; reconnecting" : value.magpiePhase === 6
-    ? `Last data - ${({ 6: "request timed out", 8: "invalid response", 9: "resource exhausted", 10: "rate limited" } as Record<number, string>)[value.magpieResult] || "reading failed"}`
+    ? `Last data - ${({ 6: "Magpie timeout", 8: "invalid Magpie reply", 9: "quota memory low", 10: "Magpie rate limit" } as Record<number, string>)[value.magpieResult] || "Magpie request failed"}`
     : value.magpieReading ? "Magpie Usage - reading" : "";
   const recovery = (value: Status) => value.state !== "connected" ? "Wi-Fi reconnecting"
     : value.magpiePhase === 6 ? value.magpieRetrySeconds > 0 ? `Retry in ${value.magpieRetrySeconds}s` : "Retrying request"
@@ -179,6 +182,9 @@ export default function App() {
       <View class="flex-col gap-3">
         <Text class="text-2xl font-bold" style={{ textColor: "#000000" }}>{title(status())}</Text>
         <Text class="text-base" style={{ textColor: "#000000" }}>{detail(status())}</Text>
+        <Show when={status().state === "connected" && status().magpiePhase === 6 && !blocked() && status().magpieRetrySeconds > 0}>
+          <Text class="text-base" style={{ textColor: "#000000" }}>{`Retry in ${status().magpieRetrySeconds}s`}</Text>
+        </Show>
         <Show when={status().state === "configuring" && !status().pairing}>
           <Text class="text-base" style={{ textColor: "#000000" }}>{`Bluetooth: ${native.ble.name}`}</Text>
           <Text class="text-base" style={{ textColor: "#000000" }}>Wi-Fi: 2.4 GHz</Text>
