@@ -435,7 +435,7 @@ export default function App() {
         </fieldset>
         </section>
         <section id="magpie-panel" role="tabpanel" aria-labelledby="magpie-tab" hidden={tab() !== "magpie"}>
-          <p>填写 Magpie 管理网页地址与登录链接 ?k= 中的 Web key。</p>
+          <p>填写 Magpie 管理网页地址。Web key 只填密钥值，不含 ?k= 或完整链接。</p>
           <fieldset disabled={busy() || applying() || !editing() || !magpieReady()}>
             <label>Magpie endpoint
               <input type="url" aria-label="Magpie endpoint" placeholder="https://magpie.example.com" value={magpie().endpoint}
