@@ -5,7 +5,6 @@ uv run --with fonttools==4.62.1 python -I tools/prepare_ui_font.py
 from pathlib import Path
 import hashlib
 import json
-import shutil
 import tempfile
 import urllib.request
 from fontTools import subset
@@ -38,5 +37,5 @@ with tempfile.TemporaryDirectory(prefix="note4-font-") as temporary:
     target = ROOT / "assets" / "fonts"
     target.mkdir(parents=True, exist_ok=True)
     font.save(target / "note4-ui.otf")
-    shutil.copyfile(ROOT / "third_party/pocketjs/assets/fonts/LICENSE-NotoSansCJK.txt", target / "OFL.txt")
+    # OFL.txt is tracked beside the subset and retained unchanged.
     print(f"Prepared NOTE4 UI: {len(points)} scalars")

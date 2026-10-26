@@ -8,7 +8,7 @@ import time
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 RESOURCE = re.compile(r"note4_resource: stage=([\w-]+) bytes=(\d+) internal_free=(\d+) internal_min=(\d+) internal_largest=(\d+) psram_free=(\d+) psram_min=(\d+) psram_largest=(\d+) stack_free=(\d+)$")
-SAFE = re.compile(r"(?:note4: build version=[\w.+-]+ idf=[\w.+-]+ elf=[0-9a-f]+|note4: state=\d+ slot=\d+ round=\d+|note4_screen: guest_heap=\d+ guest_limit=\d+ quota_version=\d+ cards=\d+|note4_screen: PocketJS frame presented in [14]bpp mode|note4_screen: quota_publication accepted=[01] materialized=-?[01] error=\d+ cards=\d+|note4_screen: frame_timing buttons=\d+ ui_ms=\d+ draw_ms=\d+ panel_ms=\d+ regions=\d+)$")
+SAFE = re.compile(r"(?:note4: build version=[\w.+-]+ idf=[\w.+-]+ elf=[0-9a-f]+|note4: state=\d+ slot=\d+ round=\d+|note4_screen: native_ui pages=\d+ page=\d+ layout_bytes=\d+ cards=\d+|note4_screen: Rust frame presented in 1bpp mode|note4_screen: quota_publication accepted=[01] materialized=-?[01] error=\d+ cards=\d+|note4_screen: frame_timing buttons=\d+ ui_ms=\d+ draw_ms=\d+ panel_ms=\d+ regions=\d+)$")
 FAULT = re.compile(r"Guru Meditation|panic'ed|Task watchdog|Stack canary|stack overflow|abort\(\)", re.I)
 FIELDS = ["bytes", "internal_free", "internal_min", "internal_largest", "psram_free", "psram_min", "psram_largest", "stack_free"]
 

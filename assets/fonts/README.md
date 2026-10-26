@@ -10,8 +10,10 @@ Regenerate from the repository root after changing the fixed UI character policy
 
 ```powershell
 uv run --with fonttools==4.62.1 python -I tools/prepare_ui_font.py
-just package-pinned
-bun test tests/quota-app.test.ts
+just prepare
+just test-ui
 ```
 
-The script verifies the downloaded source hash, keeps the source copyright/license metadata, and renames the subset to NOTE4 UI. PocketJS bakes the configured characters into the application package. Device text uses the baked cmap for coverage checks; unsupported input scalars are shown as Unicode code labels while the original text remains in the native model.
+Latin text uses Arimo Regular and Bold, an Arial-metric-compatible family under SIL OFL 1.1 (`Arimo-OFL.txt`). Sources are pinned to <https://github.com/googlefonts/Arimo/tree/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/ttf>. SHA-256: Regular `41b22bc8f0b51f932825d37bc55b5eb6ba67dfe599a626e4aff2b43b624f9f8c`, Bold `d7a8b187cf8444d4cfee102e8eae9e3043682fd5106d5d33ed677fe268a0e2ba`. Both source fonts are tracked for reproducible offline baking. CJK bold uses a one-pixel expansion of the licensed Noto bitmap.
+
+The script verifies the downloaded source hash, keeps the source copyright/license metadata, and renames the subset to NOTE4 UI. The native resource generator bakes the configured characters into monochrome Rust font tables. Device text uses the baked cmap for coverage checks; unsupported input scalars are shown as Unicode code labels while the original text remains in the native model.

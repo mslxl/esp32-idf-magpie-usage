@@ -1,3 +1,0 @@
-[submodule "third_party/pocketjs"]
-	path = third_party/pocketjs
-	url = https://github.com/pocket-nexus/pocketjs.git

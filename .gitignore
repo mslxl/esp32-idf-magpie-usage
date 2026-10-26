@@ -12,11 +12,13 @@ note4-build/
 **/sdkconfig
 **/sdkconfig.old
 **/dependencies.lock
-**/*.pocket
 **/node_modules/
 **/dist/
 **/deps/
 **/__pycache__/
 **/*.pyc
 **/*.pdb
-**/.pocket-build/
+
+# Native UI output and local migration scripts
+**/.note4-build/
+.tmp/
