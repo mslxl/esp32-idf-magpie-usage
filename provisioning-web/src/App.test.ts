@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import { render } from "solid-js/web";
 import { Opcode, type Frame } from "./protocol";
 
 const mock = vi.hoisted(() => ({ listener: undefined as ((frame: Frame) => void) | undefined,
@@ -30,7 +29,7 @@ afterEach(() => {
 it("keeps SSID and password inputs mounted and focused while typing", async () => {
   const root = document.createElement("div");
   document.body.append(root);
-  dispose = render(() => <App />, root);
+  dispose = App(root);
   root.querySelector<HTMLButtonElement>("button")!.click();
   await vi.waitFor(() => expect(root.textContent).toContain("已连接，正在读取配置"));
   mock.listener!({ opcode: Opcode.Status, requestId: 1, slot: 0, sequence: 0,
@@ -90,7 +89,7 @@ it("shows the full account directory including repeated exact identities and ori
     return 1;
   });
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <App />, root);
+  dispose = App(root);
   button(root, "连接设备").click();
   await vi.waitFor(() => expect(mock.send).toHaveBeenCalledWith(Opcode.GetWebSettings));
   emit(Opcode.Status, new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
@@ -139,7 +138,7 @@ function button(root: HTMLElement, text: string): HTMLButtonElement {
 it("saves each tab separately, stays in setup, and exits only explicitly", async () => {
   const root = document.createElement("div");
   document.body.append(root);
-  dispose = render(() => <App />, root);
+  dispose = App(root);
   button(root, "连接设备").click();
   await vi.waitFor(() => expect(mock.send).toHaveBeenCalledWith(Opcode.GetWebSettings));
   emit(Opcode.Status, new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
@@ -189,7 +188,7 @@ it("saves each tab separately, stays in setup, and exits only explicitly", async
 it("preserves the draft after a stale revision and requires an explicit retry", async () => {
   const root = document.createElement("div");
   document.body.append(root);
-  dispose = render(() => <App />, root);
+  dispose = App(root);
   button(root, "连接设备").click();
   await vi.waitFor(() => expect(mock.send).toHaveBeenCalledWith(Opcode.GetWebSettings));
   emit(Opcode.Status, new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
@@ -205,7 +204,7 @@ it("preserves the draft after a stale revision and requires an explicit retry", 
 it("clears new secrets when the device exits setup", async () => {
   const root = document.createElement("div");
   document.body.append(root);
-  dispose = render(() => <App />, root);
+  dispose = App(root);
   button(root, "连接设备").click();
   await vi.waitFor(() => expect(mock.send).toHaveBeenCalledWith(Opcode.GetWebSettings));
   emit(Opcode.Status, new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));

@@ -1,4 +1,4 @@
-import { For, Index, Show, createSignal } from "solid-js";
+import { element as h, update } from "./dom";
 import {
   decodeStatusPayload,
   decodeWebSettings,
@@ -32,29 +32,40 @@ function emptySlot(): Slot {
   return { ssid: "", password: "", passwordPresent: false, passwordMode: PasswordMode.Clear };
 }
 
-export default function App() {
-  const [connected, setConnected] = createSignal(false);
-  const [deviceName, setDeviceName] = createSignal("");
-  const [message, setMessage] = createSignal("请先连接 Magpie Usage");
-  const [slots, setSlots] = createSignal<Slot[]>(Array.from({ length: MAX_SLOTS }, emptySlot));
-  const [visibleSlots, setVisibleSlots] = createSignal(1);
-  const [scans, setScans] = createSignal<Scan[]>([]);
-  const [applying, setApplying] = createSignal(false);
-  const [busy, setBusy] = createSignal(false);
-  const [editing, setEditing] = createSignal(false);
-  const [tab, setTab] = createSignal<"network" | "magpie">("network");
-  const [magpie, setMagpie] = createSignal<WebSettings>({ endpoint: "", key: "", keyPresent: false,
+export default function mountApp(root: HTMLElement): () => void {
+  let mounted = true;
+  let ready = false;
+  function createState<T>(initial: T): [() => T, (next: T | ((old: T) => T)) => void];
+  function createState<T>(): [() => T | undefined, (next: T | undefined | ((old: T | undefined) => T | undefined)) => void];
+  function createState<T>(initial?: T) {
+    let value = initial;
+    return [() => value, (next: T | undefined | ((old: T | undefined) => T | undefined)) => {
+      value = typeof next === "function" ? (next as (old: T | undefined) => T | undefined)(value) : next;
+      if (ready && mounted) paint();
+    }];
+  }
+  const [connected, setConnected] = createState(false);
+  const [deviceName, setDeviceName] = createState("");
+  const [message, setMessage] = createState("请先连接 Magpie Usage");
+  const [slots, setSlots] = createState<Slot[]>(Array.from({ length: MAX_SLOTS }, emptySlot));
+  const [visibleSlots, setVisibleSlots] = createState(1);
+  const [scans, setScans] = createState<Scan[]>([]);
+  const [applying, setApplying] = createState(false);
+  const [busy, setBusy] = createState(false);
+  const [editing, setEditing] = createState(false);
+  const [tab, setTab] = createState<"network" | "magpie">("network");
+  const [magpie, setMagpie] = createState<WebSettings>({ endpoint: "", key: "", keyPresent: false,
     keyMode: PasswordMode.Clear, revision: 0, allowPlainHttp: false, intervalSeconds: 30,
     timezone: "", layout: "A", adaptiveFont: true });
-  const [revision, setRevision] = createSignal(0);
-  const [savedEndpoint, setSavedEndpoint] = createSignal("");
-  const [magpieReady, setMagpieReady] = createSignal(false);
-  const [networkDirty, setNetworkDirty] = createSignal(false);
-  const [magpieDirty, setMagpieDirty] = createSignal(false);
-  const [confirmExit, setConfirmExit] = createSignal(false);
-  const [directory, setDirectory] = createSignal<AccountDirectory>();
-  const [prefs, setPrefs] = createSignal<DisplayPrefs>(defaultPrefs());
-  const [prefsDirty, setPrefsDirty] = createSignal(false);
+  const [revision, setRevision] = createState(0);
+  const [savedEndpoint, setSavedEndpoint] = createState("");
+  const [magpieReady, setMagpieReady] = createState(false);
+  const [networkDirty, setNetworkDirty] = createState(false);
+  const [magpieDirty, setMagpieDirty] = createState(false);
+  const [confirmExit, setConfirmExit] = createState(false);
+  const [directory, setDirectory] = createState<AccountDirectory>();
+  const [prefs, setPrefs] = createState<DisplayPrefs>(defaultPrefs());
+  const [prefsDirty, setPrefsDirty] = createState(false);
 
   function clearSecrets(): void {
     setSlots((items) => items.map((slot) => ({ ...slot, password: "" })));
@@ -72,7 +83,7 @@ export default function App() {
     clearSecrets();
   }
 
-  transport.onEvent((frame) => {
+  const unsubscribe = transport.onEvent((frame) => {
     if (frame.opcode === Opcode.Status) {
       try {
         const status = decodeStatusPayload(frame.payload);
@@ -374,168 +385,93 @@ export default function App() {
     }
   }
 
-  return (
-    <main>
-      <h1>Magpie Usage 设置</h1>
-      <p>{message()}</p>
-      <Show when={!connected()} fallback={<strong>{deviceName()}</strong>}>
-        <button disabled={busy()} onClick={connect}>连接设备</button>
-      </Show>
-      <Show when={connected()}>
-        <div class="tabs" role="tablist" aria-label="设备设置">
-          <button id="network-tab" role="tab" aria-selected={tab() === "network"} aria-controls="network-panel" onClick={() => setTab("network")}>网络</button>
-          <button id="magpie-tab" role="tab" aria-selected={tab() === "magpie"} aria-controls="magpie-panel" onClick={() => setTab("magpie")}>Magpie 配置</button>
-        </div>
-        <section id="network-panel" role="tabpanel" aria-labelledby="network-tab" hidden={tab() !== "network"}>
-        <button disabled={busy() || applying() || !editing()} onClick={scan}>扫描 Wi‑Fi</button>
-        <fieldset disabled={busy() || applying() || !editing()}>
-        <Index each={slots().slice(0, visibleSlots())}>{(slot, index) => (
-          <section class="slot">
-            <h2>网络 {index + 1}</h2>
-            <datalist id={`wifi-scan-results-${index}`}>
-              <For each={scans()}>{(network) => <option value={network.ssid}>{network.rssi} dBm</option>}</For>
-            </datalist>
-            <input
-              type="text"
-              list={`wifi-scan-results-${index}`}
-              aria-label={`网络 ${index + 1} SSID`}
-              placeholder="选择扫描到的网络或输入 SSID"
-              value={slot().ssid}
-              onInput={(event) => updateSsid(index, event.currentTarget.value)}
-            />
-            <Show when={slot().ssid}>
-              <label>
-                密码处理
-                <select
-                  value={String(slot().passwordMode)}
-                  onChange={(event) => updateSlot(index, { passwordMode: Number(event.currentTarget.value) as PasswordModeValue, password: "" })}
-                >
-                  <option value={PasswordMode.Unchanged} disabled={!slot().passwordPresent}>保持设备中的密码</option>
-                  <option value={PasswordMode.Set}>设置新密码</option>
-                  <option value={PasswordMode.Clear}>清除密码（开放网络）</option>
-                </select>
-              </label>
-              <Show when={slot().passwordMode === PasswordMode.Set}>
-                <input
-                  type="password"
-                  placeholder="输入新密码"
-                  value={slot().password}
-                  onInput={(event) => updateSlot(index, { password: event.currentTarget.value })}
-                />
-              </Show>
-              <Show when={slot().passwordMode === PasswordMode.Unchanged && slot().passwordPresent}>
-                <small>设备已有密码，网页不会显示密码内容。</small>
-              </Show>
-            </Show>
-          </section>
-        )}</Index>
-        <Show when={canAddSlot()}>
-          <button type="button" class="add-slot" aria-label="添加 Wi-Fi" onClick={addSlot}>+</button>
-        </Show>
-        </fieldset>
-        </section>
-        <section id="magpie-panel" role="tabpanel" aria-labelledby="magpie-tab" hidden={tab() !== "magpie"}>
-          <p>填写 Magpie 管理网页地址。Web key 只填密钥值，不含 ?k= 或完整链接。</p>
-          <fieldset disabled={busy() || applying() || !editing() || !magpieReady()}>
-            <label>Magpie endpoint
-              <input type="url" aria-label="Magpie endpoint" placeholder="https://magpie.example.com" value={magpie().endpoint}
-                onInput={(event) => updateMagpie({ endpoint: event.currentTarget.value })} />
-            </label>
-            <label>Key 处理
-              <select aria-label="Key 处理" value={String(magpie().keyMode)}
-                onChange={(event) => updateMagpie({ keyMode: Number(event.currentTarget.value) as PasswordModeValue, key: "" })}>
-                <option value={PasswordMode.Unchanged} disabled={!magpie().keyPresent}>保持设备中的 Key</option>
-                <option value={PasswordMode.Set}>设置新 Key</option>
-                <option value={PasswordMode.Clear}>清除 Key</option>
-              </select>
-            </label>
-            <Show when={magpie().keyMode === PasswordMode.Set}>
-              <label>Magpie Key
-                <input type="password" aria-label="Magpie Key" autocomplete="new-password" value={magpie().key}
-                  onInput={(event) => updateMagpie({ key: event.currentTarget.value })} />
-              </label>
-            </Show>
-            <Show when={magpie().keyPresent}><small>设备已设置 Web key，网页不会读取或显示已有凭据。</small></Show>
-            <label><input type="checkbox" checked={magpie().allowPlainHttp}
-              onChange={(event) => updateMagpie({ allowPlainHttp: event.currentTarget.checked })} />允许明文 HTTP</label>
-            <label>额度读取间隔（秒）<input type="number" aria-label="额度读取间隔" min="30" max="3600"
-              value={magpie().intervalSeconds} onInput={(event) => updateMagpie({ intervalSeconds: Number(event.currentTarget.value) })} /></label>
-            <label>显示时区<input type="text" aria-label="显示时区" list="supported-timezones" value={magpie().timezone}
-              onInput={(event) => updateMagpie({ timezone: event.currentTarget.value })} /></label>
-            <datalist id="supported-timezones"><For each={SUPPORTED_TIMEZONES}>{(zone) => <option value={zone} />}</For></datalist>
-            <label>额度布局<select aria-label="额度布局" value={magpie().layout}
-              onChange={(event) => updateMagpie({ layout: event.currentTarget.value as "A" | "B" })}>
-              <option value="A">A · 单列</option><option value="B">B · 双列</option>
-            </select></label>
-            <label><input type="checkbox" checked={magpie().adaptiveFont}
-              onChange={(event) => updateMagpie({ adaptiveFont: event.currentTarget.checked })} />自适应字号</label>
-          </fieldset>
-          <button disabled={busy() || applying() || !editing()} onClick={loadDirectory}>读取完整账号目录</button>
-          <Show when={directory()}>{value => <section aria-label="完整账号目录">
-            <p>{value().groups} 个偏好组 · {value().cards.length} 张额度卡片</p>
-            <fieldset disabled={busy()}>
-              <label>显示顺序<select aria-label="显示顺序" value={prefs().order}
-                onChange={event => updatePrefs({ order: event.currentTarget.value as DisplayPrefs["order"] })}>
-                <option value="original">原顺序</option><option value="custom">自定义顺序</option><option value="smart">智能顺序</option>
-              </select></label>
-              <label>厂商范围<select aria-label="厂商范围" value={prefs().providerMode}
-                onChange={event => updatePrefs({ providerMode: event.currentTarget.value as DisplayPrefs["providerMode"] })}>
-                <option value="all">全部厂商（含新厂商）</option><option value="selected">指定厂商</option>
-              </select></label>
-              <Show when={prefs().providerMode === "selected"}>
-                <For each={[...new Set([...value().cards.map(card => card.provider), ...prefs().providers])]}>{provider =>
-                  <label><input type="checkbox" checked={prefs().providers.includes(provider)}
-                    onChange={event => updatePrefs({ providers: event.currentTarget.checked ? [...prefs().providers, provider] : prefs().providers.filter(item => item !== provider) })} />{provider}</label>
-                }</For>
-              </Show>
-              <For each={[[1, "subscription"], [2, "plan"], [4, "balance"], [8, "unknown"]] as const}>{([bit, label]) =>
-                <label><input type="checkbox" aria-label={`显示类型 ${label}`} checked={!!(prefs().kinds & bit)}
-                  onChange={event => updatePrefs({ kinds: event.currentTarget.checked ? prefs().kinds | bit : prefs().kinds & ~bit })} />{label}</label>
-              }</For>
-              <label>名称筛选<input aria-label="名称筛选" value={prefs().query}
-                onInput={event => updatePrefs({ query: event.currentTarget.value })} /></label>
-              <Show when={prefs().order === "custom"}>
-                <For each={customGroups()}>{identity => <div>
-                  <span>{identity.provider} · {identity.user || "（空账号标识）"}{directoryGroups().some(item => identityKey(item) === identityKey(identity)) ? "" : " · 当前不存在"}</span>
-                  <button onClick={() => moveGroup(identity, -1)}>上移</button><button onClick={() => moveGroup(identity, 1)}>下移</button>
-                </div>}</For>
-              </Show>
-              <p>当前不存在的偏好：{missingGroups().length}</p>
-              <ul aria-label="当前不存在的账号偏好"><For each={missingGroups()}>{identity =>
-                <li>{identity.provider} · {identity.user || "（空账号标识）"}</li>
-              }</For></ul>
-              <button onClick={cleanupMissing}>清理当前不存在的账号偏好</button>
-            </fieldset>
-            <Show when={value().cards.length === 0}><p>Magpie 暂无账号额度</p></Show>
-            <For each={value().cards}>{card => <article class="slot">
-              <strong>{card.provider} · {card.user || "（空账号标识）"}</strong>
-              <p>{[card.name, card.alias, card.seat, card.from, card.kind || "unknown", card.plan].filter(Boolean).join(" · ")}</p>
-              <small>偏好组 {card.group + 1} · 相同厂商与账号标识的卡片共用显示偏好</small>
-              <label><input type="checkbox" aria-label={`隐藏 ${card.provider} ${card.user} ${card.name}`} disabled={busy()}
-                checked={prefs().hidden.some(item => identityKey(item) === identityKey(card))}
-                onChange={() => toggleHidden(card)} />隐藏此偏好组</label>
-            </article>}</For>
-            <button disabled={busy() || !prefsDirty()} onClick={savePrefs}>保存账号显示偏好</button>
-          </section>}</Show>
-        </section>
-        <button disabled={busy() || applying() || !editing() || !magpieReady()} onClick={commit}>{applying() ? "应用中…" : "应用设置"}</button>
-        <button disabled={busy() || applying() || !editing()} onClick={async () => {
+  const button = (text: string, action: () => unknown, disabled = false, props = {}) =>
+    h("button", { type: "button", disabled, onClick: action, ...props }, text);
+  const option = (value: string | number, text: string, disabled = false) => h("option", { value: String(value), disabled }, text);
+  const label = (text: string, control: HTMLElement) => h("label", {}, text, control);
+  const input = (props: Record<string, unknown>, action: (input: HTMLInputElement) => void) =>
+    h("input", { ...props, onInput: (event: Event) => action(event.currentTarget as HTMLInputElement) });
+  const select = (value: string | number, options: HTMLElement[], action: (value: string) => void, props = {}) => {
+    const node = h("select", { ...props, onChange: (event: Event) => action((event.currentTarget as HTMLSelectElement).value) }, options) as HTMLSelectElement;
+    node.value = String(value); return node;
+  };
+  const checkbox = (text: string, checked: boolean, action: (checked: boolean) => void, props = {}) =>
+    label(text, h("input", { type: "checkbox", checked, ...props, onChange: (event: Event) => action((event.currentTarget as HTMLInputElement).checked) }));
+  const passwordOptions = (present: boolean, noun: string) => [option(PasswordMode.Unchanged, `保持设备中的${noun}`, !present),
+    option(PasswordMode.Set, `设置新${noun}`), option(PasswordMode.Clear, noun === "密码" ? "清除密码（开放网络）" : "清除 Key")];
+  function directoryView(): HTMLElement | undefined {
+    const value = directory(); if (!value) return;
+    return h("section", { "aria-label": "完整账号目录", "data-key": "directory" },
+      h("p", {}, `${value.groups} 个偏好组 · ${value.cards.length} 张额度卡片`),
+      h("fieldset", { disabled: busy() || !editing() },
+        label("显示顺序", select(prefs().order, [option("original", "原顺序"), option("custom", "自定义顺序"), option("smart", "智能顺序")], value => updatePrefs({ order: value as DisplayPrefs["order"] }), { "aria-label": "显示顺序" })),
+        label("厂商范围", select(prefs().providerMode, [option("all", "全部厂商（含新厂商）"), option("selected", "指定厂商")], value => updatePrefs({ providerMode: value as DisplayPrefs["providerMode"] }), { "aria-label": "厂商范围" })),
+        prefs().providerMode === "selected" ? [...new Set([...value.cards.map(card => card.provider), ...prefs().providers])].map(provider =>
+          checkbox(provider, prefs().providers.includes(provider), checked => updatePrefs({ providers: checked ? [...prefs().providers, provider] : prefs().providers.filter(item => item !== provider) }))) : [],
+        ([[1, "subscription"], [2, "plan"], [4, "balance"], [8, "unknown"]] as const).map(([bit, name]) =>
+          checkbox(name, !!(prefs().kinds & bit), checked => updatePrefs({ kinds: checked ? prefs().kinds | bit : prefs().kinds & ~bit }), { "aria-label": `显示类型 ${name}` })),
+        label("名称筛选", input({ "aria-label": "名称筛选", value: prefs().query }, field => updatePrefs({ query: field.value }))),
+        prefs().order === "custom" ? customGroups().map(identity => h("div", {},
+          h("span", {}, `${identity.provider} · ${identity.user || "（空账号标识）"}${directoryGroups().some(item => identityKey(item) === identityKey(identity)) ? "" : " · 当前不存在"}`),
+          button("上移", () => moveGroup(identity, -1)), button("下移", () => moveGroup(identity, 1)))) : [],
+        h("p", {}, `当前不存在的偏好：${missingGroups().length}`),
+        h("ul", { "aria-label": "当前不存在的账号偏好" }, missingGroups().map(identity => h("li", {}, `${identity.provider} · ${identity.user || "（空账号标识）"}`))),
+        button("清理当前不存在的账号偏好", cleanupMissing)),
+      value.cards.length === 0 ? h("p", {}, "Magpie 暂无账号额度") : [],
+      value.cards.map((card, index) => h("article", { class: "slot", "data-key": `card-${index}` },
+        h("strong", {}, `${card.provider} · ${card.user || "（空账号标识）"}`),
+        h("p", {}, [card.name, card.alias, card.seat, card.from, card.kind || "unknown", card.plan].filter(Boolean).join(" · ")),
+        h("small", {}, `偏好组 ${card.group + 1} · 相同厂商与账号标识的卡片共用显示偏好`),
+        checkbox("隐藏此偏好组", prefs().hidden.some(item => identityKey(item) === identityKey(card)), () => toggleHidden(card),
+          { "aria-label": `隐藏 ${card.provider} ${card.user} ${card.name}`, disabled: busy() || !editing() }))),
+      button("保存账号显示偏好", savePrefs, busy() || !editing() || !prefsDirty()));
+  }
+  function paint(): void {
+    const locked = busy() || applying() || !editing();
+    update(root, h("main", {},
+      h("h1", {}, "Magpie Usage 设置"), h("p", {}, message()),
+      connected() ? h("strong", {}, deviceName()) : button("连接设备", connect, busy()),
+      connected() ? [
+        h("div", { class: "tabs", role: "tablist", "aria-label": "设备设置" },
+          button("网络", () => setTab("network"), false, { id: "network-tab", role: "tab", "aria-selected": String(tab() === "network"), "aria-controls": "network-panel" }),
+          button("Magpie 配置", () => setTab("magpie"), false, { id: "magpie-tab", role: "tab", "aria-selected": String(tab() === "magpie"), "aria-controls": "magpie-panel" })),
+        h("section", { id: "network-panel", role: "tabpanel", "aria-labelledby": "network-tab", hidden: tab() !== "network", "data-key": "network" },
+          button("扫描 Wi‑Fi", scan, locked),
+          h("fieldset", { disabled: locked }, slots().slice(0, visibleSlots()).map((slot, index) =>
+            h("section", { class: "slot", "data-key": `slot-${index}` },
+              h("h2", {}, `网络 ${index + 1}`),
+              h("datalist", { id: `wifi-scan-results-${index}` }, scans().map(network => option(network.ssid, `${network.rssi} dBm`))),
+              input({ type: "text", list: `wifi-scan-results-${index}`, "aria-label": `网络 ${index + 1} SSID`, placeholder: "选择扫描到的网络或输入 SSID", value: slot.ssid }, field => updateSsid(index, field.value)),
+              slot.ssid ? label("密码处理", select(slot.passwordMode, passwordOptions(slot.passwordPresent, "密码"), value => updateSlot(index, { passwordMode: Number(value) as PasswordModeValue, password: "" }))) : [],
+              slot.ssid && slot.passwordMode === PasswordMode.Set ? input({ type: "password", placeholder: "输入新密码", value: slot.password, "data-key": "password" }, field => updateSlot(index, { password: field.value })) : [],
+              slot.ssid && slot.passwordMode === PasswordMode.Unchanged && slot.passwordPresent ? h("small", {}, "设备已有密码，网页不会显示密码内容。") : [])),
+            canAddSlot() ? button("+", addSlot, false, { class: "add-slot", "aria-label": "添加 Wi-Fi" }) : [])),
+        h("section", { id: "magpie-panel", role: "tabpanel", "aria-labelledby": "magpie-tab", hidden: tab() !== "magpie", "data-key": "magpie" },
+          h("p", {}, "填写 Magpie 管理网页地址。Web key 只填密钥值，不含 ?k= 或完整链接。"),
+          h("fieldset", { disabled: locked || !magpieReady() },
+            label("Magpie endpoint", input({ type: "url", "aria-label": "Magpie endpoint", placeholder: "https://magpie.example.com", value: magpie().endpoint }, field => updateMagpie({ endpoint: field.value }))),
+            label("Key 处理", select(magpie().keyMode, passwordOptions(magpie().keyPresent, " Key"), value => updateMagpie({ keyMode: Number(value) as PasswordModeValue, key: "" }), { "aria-label": "Key 处理" })),
+            magpie().keyMode === PasswordMode.Set ? h("label", { "data-key": "key-input" }, "Magpie Key", input({ type: "password", "aria-label": "Magpie Key", autocomplete: "new-password", value: magpie().key }, field => updateMagpie({ key: field.value }))) : [],
+            magpie().keyPresent ? h("small", {}, "设备已设置 Web key，网页不会读取或显示已有凭据。") : [],
+            checkbox("允许明文 HTTP", magpie().allowPlainHttp, checked => updateMagpie({ allowPlainHttp: checked }), { "data-key": "http" }),
+            label("额度读取间隔（秒）", input({ type: "number", "aria-label": "额度读取间隔", min: "30", max: "3600", value: magpie().intervalSeconds }, field => updateMagpie({ intervalSeconds: Number(field.value) }))),
+            label("显示时区", input({ type: "text", "aria-label": "显示时区", list: "supported-timezones", value: magpie().timezone }, field => updateMagpie({ timezone: field.value }))),
+            h("datalist", { id: "supported-timezones" }, SUPPORTED_TIMEZONES.map(zone => option(zone, ""))),
+            label("额度布局", select(magpie().layout, [option("A", "A · 单列紧凑卡片"), option("B", "B · 双列紧凑卡片")], value => updateMagpie({ layout: value as "A" | "B" }), { "aria-label": "额度布局" })),
+            checkbox("自适应字号", magpie().adaptiveFont, checked => updateMagpie({ adaptiveFont: checked }))),
+          button("读取完整账号目录", loadDirectory, locked), directoryView()),
+        button(applying() ? "应用中…" : "应用设置", commit, locked || !magpieReady()),
+        button("重新读取配置版本", async () => {
           setBusy(true);
-          try {
-            await transport.send(Opcode.GetStatus);
-            await transport.send(Opcode.GetWebSettings);
-          } catch (error) { setMessage(error instanceof Error ? error.message : "读取失败"); }
+          try { await transport.send(Opcode.GetStatus); await transport.send(Opcode.GetWebSettings); }
+          catch (error) { setMessage(error instanceof Error ? error.message : "读取失败"); }
           finally { setBusy(false); }
-        }}>重新读取配置版本</button>
-        <button disabled={busy() || applying() || !editing()} onClick={exitSetup}>退出设置模式</button>
-        <Show when={confirmExit()}>
-          <section role="dialog" aria-modal="true" aria-label="退出设置模式" class="slot">
-            <p>未应用的设置将丢失，已保存的设置会保留。</p>
-            <button disabled={busy()} onClick={exitSetup}>确认退出</button>
-            <button disabled={busy()} onClick={() => setConfirmExit(false)}>继续编辑</button>
-          </section>
-        </Show>
-      </Show>
-    </main>
-  );
+        }, locked),
+        button("退出设置模式", exitSetup, locked),
+        confirmExit() ? h("section", { role: "dialog", "aria-modal": "true", "aria-label": "退出设置模式", class: "slot" },
+          h("p", {}, "未应用的设置将丢失，已保存的设置会保留。"), button("确认退出", exitSetup, busy()), button("继续编辑", () => setConfirmExit(false), busy())) : []
+      ] : []));
+  }
+  ready = true; paint();
+  return () => { mounted = false; unsubscribe(); clearSecrets(); root.replaceChildren(); };
 }

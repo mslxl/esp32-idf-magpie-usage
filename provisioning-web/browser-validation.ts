@@ -3,7 +3,7 @@ import { createServer } from 'vite';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { decodeFrame, decodeSetSlotPayload, encodeFrame, Opcode, splitPayload } from './src/protocol';
-const output = new URL('../.pocket-build/validation/provisioning/browser/', import.meta.url);
+const output = new URL('../.note4-build/validation/provisioning/browser/', import.meta.url);
 await mkdir(output, { recursive: true });
 const server = await createServer({ root: fileURLToPath(new URL('.', import.meta.url)),
   server: { host: '127.0.0.1', port: 5174, strictPort: true } });

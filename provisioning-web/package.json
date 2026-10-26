@@ -9,8 +9,6 @@
     "test:browser": "bun browser-validation.ts"
   },
   "dependencies": {
-    "vite-plugin-solid": "latest",
-    "solid-js": "^1.9.14",
     "vite": "latest"
   },
   "devDependencies": {
