@@ -8,7 +8,7 @@ import time
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 RESOURCE = re.compile(r"note4_resource: stage=([\w-]+) bytes=(\d+) internal_free=(\d+) internal_min=(\d+) internal_largest=(\d+) psram_free=(\d+) psram_min=(\d+) psram_largest=(\d+) stack_free=(\d+)$")
-SAFE = re.compile(r"(?:note4: build version=[\w.+-]+ idf=[\w.+-]+ elf=[0-9a-f]+|note4: state=\d+ slot=\d+ round=\d+|note4_screen: guest_heap=\d+ guest_limit=\d+ quota_version=\d+ cards=\d+|note4_screen: PocketJS frame presented in [14]bpp mode)$")
+SAFE = re.compile(r"(?:note4: build version=[\w.+-]+ idf=[\w.+-]+ elf=[0-9a-f]+|note4: state=\d+ slot=\d+ round=\d+|note4_screen: guest_heap=\d+ guest_limit=\d+ quota_version=\d+ cards=\d+|note4_screen: PocketJS frame presented in [14]bpp mode|note4_screen: quota_publication accepted=[01] materialized=-?[01] error=\d+ cards=\d+|note4_screen: frame_timing buttons=\d+ ui_ms=\d+ draw_ms=\d+ panel_ms=\d+ regions=\d+)$")
 FAULT = re.compile(r"Guru Meditation|panic'ed|Task watchdog|Stack canary|stack overflow|abort\(\)", re.I)
 FIELDS = ["bytes", "internal_free", "internal_min", "internal_largest", "psram_free", "psram_min", "psram_largest", "stack_free"]
 
@@ -16,6 +16,7 @@ FIELDS = ["bytes", "internal_free", "internal_min", "internal_largest", "psram_f
 def summarize(path):
     stages = {}
     faults = 0
+    publications = rejections = 0
     builds = []
     first = last = None
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -25,6 +26,8 @@ def summarize(path):
         last = timestamp if last is None else max(last, timestamp)
         line = record["line"]
         faults += line == "FAULT_MARKER"
+        publications += "quota_publication accepted=1 materialized=1 error=0 " in line
+        rejections += "quota_publication accepted=0 " in line
         if "note4: build " in line:
             builds.append(line)
         match = RESOURCE.search(line)
@@ -39,6 +42,7 @@ def summarize(path):
             stage["maximum"][field] = max(stage["maximum"][field], values[field])
     duration = (last - first).total_seconds() if first and last else 0
     return {"observed_seconds": duration, "observed_24_hours": duration >= 86400, "fault_markers": faults,
+            "accepted_publications": publications, "rejected_publications": rejections,
             "boot_records": builds, "stages": stages,
             "acceptance": "Manual screen/fault timeline and steady-state memory review still required"}
 

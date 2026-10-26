@@ -34,11 +34,13 @@ static unsigned s_pending_epoch;
 static note4_screen_quota_handler_t s_pending_handler;
 static void *s_pending_context;
 static int s_materialized;
+static int64_t s_materialized_at;
 
 static JSValue quota_materialized(JSContext *context, JSValueConst self, int argc, JSValueConst *argv) {
     (void)self;
     if (argc != 1) return JS_ThrowTypeError(context, "Expected publication result");
     s_materialized = JS_ToBool(context, argv[0]) ? 1 : -1;
+    s_materialized_at = esp_timer_get_time();
     return JS_UNDEFINED;
 }
 static note4_display_prefs_t *s_pending_prefs, *s_prefs;
@@ -280,7 +282,14 @@ static esp_err_t update_surface(const note4_provisioning_snapshot_t *snapshot) {
 static esp_err_t render_frame(uint32_t buttons) {
     pocketjs_ui_input_t input = {.struct_size = sizeof(input), .buttons = buttons};
     pocketjs_ui_frame_view_t frame = {.struct_size = sizeof(frame)};
+    const int64_t started = esp_timer_get_time();
+    s_materialized_at = 0;
     esp_err_t err = pocketjs_ui_turn(s_screen.binding, &input, &frame);
+    if (s_materialized_at != 0)
+        ESP_LOGI(TAG, "[DEBUG-layout] materialize_ms=%u remaining_ms=%u",
+            (unsigned)((s_materialized_at - started) / 1000),
+            (unsigned)((esp_timer_get_time() - s_materialized_at) / 1000));
+    const int64_t turned = esp_timer_get_time();
     if (err != ESP_OK) return err;
     if (s_materialized < 0) return ESP_ERR_NO_MEM;
     pocketjs_rgb565_damage_plan_t plan = {.struct_size = sizeof(plan)};
@@ -307,6 +316,7 @@ static esp_err_t render_frame(uint32_t buttons) {
             region, NULL, &stats);
         if (err != ESP_OK) goto fail;
     }
+    const int64_t drawn = esp_timer_get_time();
     if (plan.region_count != 0U) {
         size_t black_pixels = 0U;
         for (size_t pixel = 0U; pixel < NOTE4_WIDTH * NOTE4_HEIGHT; ++pixel) {
@@ -330,6 +340,11 @@ static esp_err_t render_frame(uint32_t buttons) {
         ESP_LOGI(TAG, "PocketJS frame presented in %s mode",
                  mode == NOTE4_PRESENT_MODE_GRAY ? "4bpp" : "1bpp");
     }
+    if (buttons != 0U || plan.region_count != 0U || turned - started >= 1000000)
+        ESP_LOGI(TAG, "frame_timing buttons=%u ui_ms=%u draw_ms=%u panel_ms=%u regions=%u",
+            (unsigned)buttons, (unsigned)((turned - started) / 1000),
+            (unsigned)((drawn - turned) / 1000), (unsigned)((esp_timer_get_time() - drawn) / 1000),
+            (unsigned)plan.region_count);
     return pocketjs_rgb565_commit(s_screen.renderer, s_screen.target, &frame);
 fail:
     pocketjs_rgb565_abort(s_screen.renderer, s_screen.target);
@@ -452,6 +467,8 @@ static void screen_task(void *arg) {
                 s_quotas = previous_quotas; ++s_quota_version;
                 pocketjs_rgb565_target_invalidate(s_screen.target);
             }
+            ESP_LOGI(TAG, "quota_publication accepted=%u materialized=%d error=%d cards=%u",
+                accepted ? 1U : 0U, s_materialized, (int)err, (unsigned)note4_quota_count(s_quotas));
             settle_page(accepted);
             note4_quota_snapshot_release(accepted ? previous_quotas : next_quotas);
         } else settle_page(err == ESP_OK);
