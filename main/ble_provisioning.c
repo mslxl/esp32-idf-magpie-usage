@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_mac.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -22,6 +23,8 @@
 static const char *TAG = "note4_ble";
 extern void ble_store_config_init(void);
 static QueueHandle_t s_events;
+static StaticQueue_t s_event_queue;
+#define NOTE4_BLE_EVENT_CAPACITY 12U
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_handle;
 static bool s_status_subscribed;
@@ -249,10 +252,19 @@ esp_err_t note4_ble_provisioning_init(void) {
     if (err != ESP_OK) return err;
     snprintf(s_device_name, sizeof(s_device_name), "magpie-usage-%02x%02x%02x",
              (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
-    s_events = xQueueCreate(12, sizeof(note4_ble_event_t));
-    if (s_events == NULL) return ESP_ERR_NO_MEM;
+    /* These events are exchanged only between tasks. Keep queue control in
+     * internal BSS; the copied transaction payloads do not require DMA memory. */
+    uint8_t *storage = heap_caps_malloc(NOTE4_BLE_EVENT_CAPACITY * sizeof(note4_ble_event_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (storage == NULL) return ESP_ERR_NO_MEM;
+    s_events = xQueueCreateStatic(NOTE4_BLE_EVENT_CAPACITY, sizeof(note4_ble_event_t),
+        storage, &s_event_queue);
+    if (s_events == NULL) { heap_caps_free(storage); return ESP_ERR_NO_MEM; }
     err = nimble_port_init();
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        vQueueDelete(s_events); s_events = NULL; heap_caps_free(storage);
+        return err;
+    }
     ble_svc_gap_init();
     ble_svc_gatt_init();
     if (ble_svc_gap_device_name_set(s_device_name) != 0 ||

@@ -1,5 +1,6 @@
 #include "quota_order.h"
 #include "resource_budget.h"
+#include "external_memory.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,9 +15,9 @@ note4_quota_result_t note4_quota_order_prepare(const note4_quota_order_t *order,
     const size_t count = note4_quota_count(snapshot), previous_count = note4_quota_count(order->baseline);
     if (count > SIZE_MAX / (sizeof(size_t) * 3U + sizeof(bool)) ||
         !note4_resource_available(count * (sizeof(size_t) * 3U + sizeof(bool)))) return NOTE4_QUOTA_NO_MEMORY;
-    size_t *indices = count ? malloc(count * sizeof(*indices)) : NULL;
-    size_t *matched = count ? malloc(count * sizeof(*matched)) : NULL;
-    bool *changed = count ? calloc(count, sizeof(*changed)) : NULL;
+    size_t *indices = count ? note4_external_malloc(count * sizeof(*indices)) : NULL;
+    size_t *matched = count ? note4_external_malloc(count * sizeof(*matched)) : NULL;
+    bool *changed = count ? note4_external_calloc(count, sizeof(*changed)) : NULL;
     if (count && (!indices || !matched || !changed)) { free(indices); free(matched); free(changed); return NOTE4_QUOTA_NO_MEMORY; }
     for (size_t i = 0; i < count; ++i) matched[i] = SIZE_MAX;
     note4_quota_result_t result = NOTE4_QUOTA_OK;

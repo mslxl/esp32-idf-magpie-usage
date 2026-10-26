@@ -1,5 +1,6 @@
 #include "magpie_client.h"
 #include "resource_budget.h"
+#include "external_memory.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -222,8 +223,8 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
     stream_t stream = {.io = io, .start = io->now_ms(io->context), .progress = io->now_ms(io->context)};
     note4_magpie_session_t candidate = {0};
     bool seen_cookie = false;
-    char *request = calloc(1U, 4096U);
-    char *body = calloc(1U, 3U * NOTE4_MAGPIE_ENDPOINT_MAX + 3U * NOTE4_MAGPIE_KEY_MAX + 64U);
+    char *request = note4_external_calloc(1U, 4096U);
+    char *body = note4_external_calloc(1U, 3U * NOTE4_MAGPIE_ENDPOINT_MAX + 3U * NOTE4_MAGPIE_KEY_MAX + 64U);
     if (request == NULL || body == NULL) { free(request); free(body); return NOTE4_MAGPIE_RESOURCE_EXHAUSTED; }
     if (login) {
         char back[NOTE4_MAGPIE_ENDPOINT_MAX + 2U];
@@ -353,7 +354,7 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
                     size_t next_capacity = capacity ? capacity + capacity / 2U : 1024U;
                     if (next_capacity > NOTE4_RESPONSE_BUDGET) next_capacity = NOTE4_RESPONSE_BUDGET;
                     if (next_capacity <= capacity || !note4_resource_available(next_capacity)) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
-                    char *next = realloc(response->body, next_capacity);
+                    char *next = note4_external_realloc(response->body, next_capacity);
                     if (next == NULL) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
                     response->body = next; capacity = next_capacity;
                 }
@@ -367,7 +368,7 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
         }
         if (alive(&stream)) {
             if (response->body == NULL) {
-                response->body = calloc(1U, 1U);
+                response->body = note4_external_calloc(1U, 1U);
                 if (response->body == NULL) stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED;
             } else response->body[response->length] = 0;
         }

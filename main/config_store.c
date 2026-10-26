@@ -1,4 +1,5 @@
 #include "config_store.h"
+#include "external_memory.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -117,7 +118,7 @@ esp_err_t note4_config_store_load_bundle(note4_settings_t *config, bool *found, 
     if (!present) { err = load_legacy(config, found); if (err == ESP_OK) { *prefs = NULL; *length = 0U; } return err; }
     const uint32_t total = get32(manifest + 8U), settings_length = get32(manifest + 12U);
     if (settings_length > NOTE4_SETTINGS_MAX_BYTES || settings_length > total || settings_length == 0U) return ESP_ERR_INVALID_STATE;
-    uint8_t *bytes = malloc(total);
+    uint8_t *bytes = note4_external_malloc(total);
     if (bytes == NULL) return ESP_ERR_NO_MEM;
     size_t offset = 0U;
     for (uint32_t index = 0U; offset < total; ++index) {
@@ -135,7 +136,7 @@ esp_err_t note4_config_store_load_bundle(note4_settings_t *config, bool *found, 
     memset(&blob, 0, sizeof(blob));
     if (!valid) { memset(bytes, 0, total); free(bytes); return ESP_ERR_INVALID_STATE; }
     const size_t prefs_length = total - settings_length;
-    uint8_t *document = prefs_length ? malloc(prefs_length) : NULL;
+    uint8_t *document = prefs_length ? note4_external_malloc(prefs_length) : NULL;
     if (prefs_length && document == NULL) { memset(bytes, 0, total); free(bytes); return ESP_ERR_NO_MEM; }
     if (prefs_length) memcpy(document, bytes + settings_length, prefs_length);
     memset(bytes, 0, total); free(bytes);
@@ -181,7 +182,7 @@ esp_err_t note4_config_store_save_bundle(const note4_settings_t *config, const u
     if (err != ESP_OK) { memset(&blob, 0, sizeof(blob)); return err; }
     const uint8_t bank = present ? (uint8_t)(1U - previous[4]) : 0U;
     const size_t total = blob.length + length;
-    uint8_t *bytes = malloc(total);
+    uint8_t *bytes = note4_external_malloc(total);
     if (bytes == NULL) { memset(&blob, 0, sizeof(blob)); return ESP_ERR_NO_MEM; }
     memcpy(bytes, blob.bytes, blob.length); if (length) memcpy(bytes + blob.length, prefs, length);
     uint8_t manifest[BUNDLE_MANIFEST] = {'N', '4', 'B', '3', bank};

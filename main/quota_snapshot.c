@@ -1,5 +1,6 @@
 #include "quota_snapshot.h"
 #include "resource_budget.h"
+#include "external_memory.h"
 
 #include <stdio.h>
 #include <stdatomic.h>
@@ -26,7 +27,7 @@ static void *parse_allocate(parser_t *parser, size_t bytes, bool zero) {
     if (bytes > NOTE4_MODEL_BUDGET - parser->bytes || !note4_resource_available(bytes)) {
         parser->error = NOTE4_QUOTA_NO_MEMORY; return NULL;
     }
-    void *memory = zero ? calloc(1U, bytes) : malloc(bytes);
+    void *memory = zero ? note4_external_calloc(1U, bytes) : note4_external_malloc(bytes);
     if (memory == NULL) parser->error = NOTE4_QUOTA_NO_MEMORY;
     else parser->bytes += bytes;
     return memory;
@@ -298,7 +299,7 @@ note4_quota_result_t note4_quota_set_smart_order(note4_quota_snapshot_t *snapsho
     if (!snapshot || (snapshot->count && !indices)) return NOTE4_QUOTA_INVALID;
     if (snapshot->count > (NOTE4_MODEL_BUDGET - snapshot->bytes) / sizeof(size_t) ||
         !note4_resource_available(snapshot->count * sizeof(size_t))) return NOTE4_QUOTA_NO_MEMORY;
-    size_t *ranks = snapshot->count ? malloc(snapshot->count * sizeof(*ranks)) : NULL;
+    size_t *ranks = snapshot->count ? note4_external_malloc(snapshot->count * sizeof(*ranks)) : NULL;
     if (snapshot->count && !ranks) return NOTE4_QUOTA_NO_MEMORY;
     for (size_t i = 0; i < snapshot->count; ++i) ranks[i] = SIZE_MAX;
     for (size_t i = 0; i < snapshot->count; ++i) {

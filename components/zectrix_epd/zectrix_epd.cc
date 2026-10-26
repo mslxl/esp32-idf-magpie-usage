@@ -558,7 +558,7 @@ extern "C" esp_err_t zectrix_epd_new(const zectrix_epd_config_t* config,
     }
     epd->mutex = xSemaphoreCreateMutex();
     epd->shadow = static_cast<uint8_t*>(
-        heap_caps_malloc(ZECTRIX_EPD_1BPP_FRAME_BYTES, MALLOC_CAP_8BIT));
+        heap_caps_malloc(ZECTRIX_EPD_1BPP_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     epd->dma_buffer = static_cast<uint8_t*>(heap_caps_malloc(
         kMaxTransferSize, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     if (epd->mutex == nullptr || epd->shadow == nullptr || epd->dma_buffer == nullptr) {

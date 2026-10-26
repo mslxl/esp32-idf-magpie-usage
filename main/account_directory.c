@@ -1,5 +1,6 @@
 #include "account_directory.h"
 #include "resource_budget.h"
+#include "external_memory.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -57,8 +58,8 @@ note4_ble_status_t note4_account_directory_open(note4_account_directory_t *direc
     size += 4U + prefs_length;
     if (size > NOTE4_DOCUMENT_BUDGET || count * sizeof(uint32_t) > SIZE_MAX - size ||
         !note4_resource_available(size + count * sizeof(uint32_t))) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
-    uint8_t *candidate = malloc(size);
-    uint32_t *groups = count ? malloc(count * sizeof(*groups)) : NULL;
+    uint8_t *candidate = note4_external_malloc(size);
+    uint32_t *groups = count ? note4_external_malloc(count * sizeof(*groups)) : NULL;
     if (candidate == NULL || (count && groups == NULL)) { free(candidate); free(groups); return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED; }
     candidate[0] = NOTE4_DIRECTORY_SCHEMA;
     put32(candidate + 1U, (uint32_t)count);

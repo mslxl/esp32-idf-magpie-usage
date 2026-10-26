@@ -8,7 +8,6 @@
 struct note4_presenter {
     uint16_t *rgb565;
     uint8_t *bw;
-    uint8_t *gray;
     bool has_frame;
     note4_present_mode_t mode;
 };
@@ -42,9 +41,8 @@ esp_err_t note4_presenter_create(note4_presenter_t **out_presenter) {
     if (presenter == NULL) return ESP_ERR_NO_MEM;
     presenter->rgb565 = heap_caps_malloc(
         NOTE4_WIDTH * NOTE4_HEIGHT * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    presenter->bw = heap_caps_malloc(NOTE4_FRAME_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    presenter->gray = heap_caps_malloc(NOTE4_4BPP_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (presenter->rgb565 == NULL || presenter->bw == NULL || presenter->gray == NULL) {
+    presenter->bw = heap_caps_malloc(NOTE4_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (presenter->rgb565 == NULL || presenter->bw == NULL) {
         note4_presenter_destroy(presenter);
         return ESP_ERR_NO_MEM;
     }
@@ -58,7 +56,6 @@ void note4_presenter_destroy(note4_presenter_t *presenter) {
     if (presenter == NULL) return;
     if (presenter->rgb565 != NULL) heap_caps_free(presenter->rgb565);
     if (presenter->bw != NULL) heap_caps_free(presenter->bw);
-    if (presenter->gray != NULL) heap_caps_free(presenter->gray);
     free(presenter);
 }
 
@@ -96,19 +93,22 @@ esp_err_t note4_presenter_present(
         /* SSD2683 4bpp refresh does not establish the 1bpp shadow base.
          * Follow the reference NOTE4 scene sequence: white 1bpp base first,
          * then the calibrated external-waveform gray refresh. */
+        uint8_t *gray = heap_caps_malloc(NOTE4_4BPP_FRAME_BYTES,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (gray == NULL) return ESP_ERR_NO_MEM;
+        if (!note4_rgb565_to_4bpp_frame(
+                presenter->rgb565, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH,
+                gray_regions, gray_region_count, gray,
+                NOTE4_4BPP_FRAME_BYTES, threshold)) {
+            heap_caps_free(gray);
+            return ESP_ERR_INVALID_ARG;
+        }
         memset(presenter->bw, 0xFF, NOTE4_FRAME_BYTES);
         esp_err_t err = zectrix_epd_refresh_full_1bpp(
             epd, presenter->bw, NOTE4_FRAME_BYTES);
-        if (err != ESP_OK) return err;
-
-        if (!note4_rgb565_to_4bpp_frame(
-                presenter->rgb565, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH,
-                gray_regions, gray_region_count, presenter->gray,
-                NOTE4_4BPP_FRAME_BYTES, threshold)) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        err = zectrix_epd_refresh_full_4bpp(
-            epd, presenter->gray, NOTE4_4BPP_FRAME_BYTES);
+        if (err == ESP_OK) err = zectrix_epd_refresh_full_4bpp(
+            epd, gray, NOTE4_4BPP_FRAME_BYTES);
+        heap_caps_free(gray);
         if (err == ESP_OK) {
             presenter->has_frame = true;
             presenter->mode = NOTE4_PRESENT_MODE_GRAY;
@@ -119,13 +119,13 @@ esp_err_t note4_presenter_present(
 
     const bool need_full = full_redraw || !presenter->has_frame ||
                            presenter->mode != NOTE4_PRESENT_MODE_BW;
-    if (!note4_rgb565_to_1bpp_rect(
-            presenter->rgb565, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH,
-            (note4_rect_t){0, 0, NOTE4_WIDTH, NOTE4_HEIGHT}, presenter->bw,
-            NOTE4_FRAME_BYTES, threshold)) {
-        return ESP_ERR_INVALID_ARG;
-    }
     if (need_full) {
+        if (!note4_rgb565_to_1bpp_rect(
+                presenter->rgb565, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH,
+                (note4_rect_t){0, 0, NOTE4_WIDTH, NOTE4_HEIGHT}, presenter->bw,
+                NOTE4_FRAME_BYTES, threshold)) {
+            return ESP_ERR_INVALID_ARG;
+        }
         esp_err_t err = zectrix_epd_refresh_full_1bpp(
             epd, presenter->bw, NOTE4_FRAME_BYTES);
         if (err == ESP_OK) {
@@ -139,16 +139,15 @@ esp_err_t note4_presenter_present(
     for (size_t i = 0; i < damage_count; ++i) {
         const note4_rect_t rect = damage[i];
         const size_t bytes = ((rect.width + 7U) / 8U) * rect.height;
-        uint8_t *patch = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (patch == NULL) return ESP_ERR_NO_MEM;
+        /* The driver consumes each packed rectangle synchronously and owns its
+         * old-frame shadow, so the full-frame buffer can serve as patch scratch. */
         const bool converted = note4_rgb565_to_1bpp_rect(
             presenter->rgb565, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH, rect,
-            patch, bytes, threshold);
+            presenter->bw, bytes, threshold);
         const zectrix_epd_rect_t epd_rect = {
             (int)rect.x, (int)rect.y, (int)rect.width, (int)rect.height};
         esp_err_t err = converted ? zectrix_epd_refresh_partial_1bpp(
-            epd, &epd_rect, patch, bytes) : ESP_ERR_INVALID_ARG;
-        heap_caps_free(patch);
+            epd, &epd_rect, presenter->bw, bytes) : ESP_ERR_INVALID_ARG;
         if (err != ESP_OK) return err;
     }
     presenter->has_frame = true;

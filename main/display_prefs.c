@@ -1,5 +1,6 @@
 #include "display_prefs.h"
 #include "resource_budget.h"
+#include "external_memory.h"
 #include <stdlib.h>
 #include <string.h>
 #include "casefold_data.h"
@@ -103,7 +104,7 @@ static note4_ble_status_t identities(reader_t *r, note4_account_identity_t **out
     *count = read32(r);
     if (!r->valid || *count > (r->length - r->offset) / 8U || *count > SIZE_MAX / sizeof(**output)) return NOTE4_BLE_ERR_VALIDATION;
     if (!*count) return NOTE4_BLE_OK;
-    *output = calloc(*count, sizeof(**output));
+    *output = note4_external_calloc(*count, sizeof(**output));
     if (*output == NULL) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     for (uint32_t i = 0U; i < *count; ++i) {
         (*output)[i].provider = text(r); (*output)[i].user = text(r);
@@ -118,9 +119,9 @@ note4_ble_status_t note4_display_prefs_parse(const uint8_t *bytes, size_t length
         return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     if (bytes[0] != 2U) return NOTE4_BLE_ERR_UNSUPPORTED_SCHEMA;
     if (bytes[1] > 2U || bytes[2] > 1U || bytes[3] > 15U) return NOTE4_BLE_ERR_VALIDATION;
-    note4_display_prefs_t *prefs = calloc(1U, sizeof(*prefs));
+    note4_display_prefs_t *prefs = note4_external_calloc(1U, sizeof(*prefs));
     if (prefs == NULL) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
-    atomic_init(&prefs->references, 1U); prefs->bytes = malloc(length); prefs->text = malloc(length + 1U);
+    atomic_init(&prefs->references, 1U); prefs->bytes = note4_external_malloc(length); prefs->text = note4_external_malloc(length + 1U);
     note4_ble_status_t status = NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     if (prefs->bytes == NULL || prefs->text == NULL) goto fail;
     memcpy(prefs->bytes, bytes, length); prefs->length = (uint32_t)length;
@@ -130,7 +131,7 @@ note4_ble_status_t note4_display_prefs_parse(const uint8_t *bytes, size_t length
     status = NOTE4_BLE_ERR_VALIDATION;
     if (!r.valid || prefs->provider_count > (length - r.offset) / 4U || prefs->provider_count > SIZE_MAX / sizeof(*prefs->providers)) goto fail;
     if (prefs->provider_count) {
-        prefs->providers = calloc(prefs->provider_count, sizeof(*prefs->providers));
+        prefs->providers = note4_external_calloc(prefs->provider_count, sizeof(*prefs->providers));
         if (prefs->providers == NULL) { status = NOTE4_BLE_ERR_RESOURCE_EXHAUSTED; goto fail; }
     }
     for (uint32_t i = 0U; i < prefs->provider_count; ++i) {
@@ -182,7 +183,7 @@ note4_ble_status_t note4_display_prefs_begin(note4_display_prefs_upload_t *uploa
     uint32_t revision, uint32_t length, uint32_t crc, uint64_t now) {
     if (length < 20U) return NOTE4_BLE_ERR_LENGTH;
     if (length > NOTE4_DOCUMENT_BUDGET || !note4_resource_available(length)) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
-    uint8_t *candidate = malloc(length);
+    uint8_t *candidate = note4_external_malloc(length);
     if (candidate == NULL) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     note4_display_prefs_upload_clear(upload);
     upload->bytes = candidate; upload->length = length; upload->crc = crc; upload->revision = revision; upload->active_at = now;
