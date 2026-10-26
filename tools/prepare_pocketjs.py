@@ -56,6 +56,21 @@ def main() -> None:
         patched = text.replace(EXPECTED_HASH, QUICKJS_014_HASH, 1)
     else:
         raise SystemExit("unexpected PocketJS preparer; review the pinned dependency before patching")
+    # Xtensa defines uint32_t as unsigned long. Passing its address as int *
+    # lets the optimizer discard string_getc's cursor update. Use an int cursor
+    # matching string_getc instead; JSString lengths fit within signed int.
+    return_statement = '    return text[:start] + method + text[end:]'
+    if patched.count(return_statement) != 1:
+        raise SystemExit("unexpected QuickJS preparer return; review iterator patch")
+    patched = patched.replace(return_statement, r'''    text = text[:start] + method + text[end:]
+    start = text.index("static JSValue js_string_iterator_next(")
+    end = text.index("\nstatic ", start + 1)
+    method = text[start:end]
+    if method.count("uint32_t idx, c, start;") != 1 or method.count("string_getc(p, (int *)&idx)") != 1:
+        raise ValueError("unexpected string iterator implementation")
+    method = method.replace("uint32_t idx, c, start;", "int idx; uint32_t c, start;")
+    method = method.replace("string_getc(p, (int *)&idx)", "string_getc(p, &idx)")
+    return text[:start] + method + text[end:]''')
     if OVERLAY_ROOT.exists():
         shutil.rmtree(OVERLAY_ROOT)
     overlay_preparer = OVERLAY_PREPARER
