@@ -35,6 +35,7 @@ typedef struct {
     void (*balance)(const void *, size_t card, size_t part, note4_ui_balance_t *out);
     uint32_t (*visible)(const void *, size_t card);
     size_t (*rank)(const void *, size_t card);
+    uint32_t smart_order;
 } note4_ui_source_t;
 
 typedef struct {

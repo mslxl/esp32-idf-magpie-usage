@@ -209,6 +209,7 @@ pub struct Source {
     balance: extern "C" fn(*const c_void, usize, usize, *mut BalanceFields),
     visible: extern "C" fn(*const c_void, usize) -> u32,
     rank: extern "C" fn(*const c_void, usize) -> usize,
+    smart_order: u32,
 }
 
 /// Borrowed source text; invalid UTF-8 is shown rather than dropped.
@@ -881,6 +882,27 @@ impl Ui {
         Ok(())
     }
 
+    fn measure_card(&mut self, source: &Source, index: usize, width: i16, heading: bool, status: &Status) -> Result<i16, ()> {
+        let start = self.count;
+        let text_start = self.bytes;
+        let next_change = self.next_change;
+        let card = source.card(index);
+        let result = self.card(source, index, &card, width, heading, status)
+            .map(|()| self.height(start, self.count) + 2 * PADDING);
+        self.count = start;
+        self.bytes = text_start;
+        self.next_change = next_change;
+        result
+    }
+
+    fn fits_current(&mut self, source: &Source, slot: usize, outer: i16, cursor: &Cursor, previous: &str, status: &Status) -> Result<bool, ()> {
+        let index = self.order[slot].1;
+        let card = source.card(index);
+        let heading = previous != card.provider || cursor.y == CARD_TOP;
+        let height = self.measure_card(source, index, outer - 2 * PADDING, heading, status)?;
+        Ok(cursor.y + height <= CARD_BOTTOM)
+    }
+
     fn layout(&mut self, source: &Source, status: &Status, size: u8) -> Result<(), ()> {
         self.reset(size, status);
         let top = CARD_TOP;
@@ -888,13 +910,30 @@ impl Ui {
         let two_columns = status.layout == layout::TWO_COLUMNS;
         let mut cursor = Cursor { page: 0, y: top, column: 0 };
         let mut previous = "";
-        for slot in 0..self.order_count {
+        let mut placed = [false; MAX_CARDS];
+        for _ in 0..self.order_count {
+            let preferred = (0..self.order_count).find(|&slot| !placed[slot]).ok_or(())?;
+            let mut slot = preferred;
+            let outer = if two_columns { HALF_WIDTH } else { FULL_WIDTH };
+            if source.smart_order != 0
+                && !self.fits_current(source, preferred, outer, &cursor, previous, status)?
+            {
+                for candidate in preferred + 1..self.order_count {
+                    if !placed[candidate]
+                        && self.fits_current(source, candidate, outer, &cursor, previous, status)?
+                    {
+                        slot = candidate;
+                        break;
+                    }
+                }
+            }
+            placed[slot] = true;
             let index = self.order[slot].1;
             let card = source.card(index);
             let provider = card.provider;
             let start = self.count;
             let text_start = self.bytes;
-            let mut outer = if two_columns { HALF_WIDTH } else { FULL_WIDTH };
+            let mut outer = outer;
             let inner = |outer: i16| outer - 2 * PADDING;
             let heading = previous != provider || cursor.y == top;
             self.card(source, index, &card, inner(outer), heading, status)?;

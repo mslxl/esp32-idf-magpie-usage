@@ -137,7 +137,8 @@ static esp_err_t build_layout(note4_ui_t *ui, const note4_quota_snapshot_t *quot
                               const note4_ui_status_t *status) {
     const quota_source_t context = {quotas, s_prefs};
     const note4_ui_source_t source = {&context, note4_quota_count(quotas), source_card,
-        source_window, source_balance, source_visible, source_rank};
+        source_window, source_balance, source_visible, source_rank,
+        s_prefs != NULL && s_prefs->order == 2U};
     return note4_ui_build(ui, &source, status) == 0 ? ESP_OK : ESP_ERR_NO_MEM;
 }
 

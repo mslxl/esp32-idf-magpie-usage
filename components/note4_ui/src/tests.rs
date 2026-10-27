@@ -47,9 +47,18 @@ extern "C" fn balance(_: *const c_void, _: usize, _: usize, _: *mut BalanceField
 }
 extern "C" fn visible(context: *const c_void, _: usize) -> u32 { fixture_of(context).visible as u32 }
 extern "C" fn rank(_: *const c_void, card: usize) -> usize { card }
-fn source(fixture: &Fixture) -> Source {
-    Source { context: (fixture as *const Fixture).cast(), count: fixture.cards.len(), card, window, balance, visible, rank }
+extern "C" fn gap_rank(context: *const c_void, card: usize) -> usize {
+    match fixture_of(context).cards[card].fields.get("user").map(|value| value.as_bytes()) {
+        Some(b"A") => 0,
+        Some(b"B") => 1,
+        Some(b"C") => 2,
+        _ => usize::MAX,
+    }
 }
+fn source_with(fixture: &Fixture, smart_order: u32, rank: extern "C" fn(*const c_void, usize) -> usize) -> Source {
+    Source { context: (fixture as *const Fixture).cast(), count: fixture.cards.len(), card, window, balance, visible, rank, smart_order }
+}
+fn source(fixture: &Fixture) -> Source { source_with(fixture, 0, rank) }
 fn status(layout: u32) -> Status {
     Status { state: 5, slot: 0, round: 0, storage_error: 0, pairing: 0, passkey: 0,
         phase: 4, result: 0, error_page: 0, reading: 0, retry_seconds: 0, layout, adaptive: 1,
@@ -94,6 +103,15 @@ fn artifact(name: &str, pixels: &[u16]) {
     }
 }
 
+fn gap_fixture() -> Fixture {
+    let card = |user: &'static str, windows: usize| Card {
+        fields: fields(&[("provider", "Codex"), ("user", user), ("plan", "Pro")]),
+        windows: (0..windows).map(|index| fields(&[("name", &format!("Window {}", index + 1)),
+            ("used", "25"), ("resetsAt", "2026-10-25T08:00:00Z")])).collect(),
+    };
+    Fixture { visible: true, cards: vec![card("C", 0), card("A", 2), card("B", 4)] }
+}
+
 fn prototype_fixture() -> Fixture {
     Fixture { visible:true, cards: [
         ("CODEX","work@example.test","Plus",vec![("5 小时","42","2026-10-25T08:00:00Z")]),
@@ -107,6 +125,52 @@ fn prototype_fixture() -> Fixture {
         if provider=="DEEPSEEK" {data.insert("balance",CString::new("¥ 128.60").unwrap());}
         Card { fields:data, windows:windows.into_iter().map(|(name,used,resets)|fields(&[("name",name),("used",used),("resetsAt",resets)])).collect() }
     }).collect() }
+}
+
+#[test]
+fn smart_order_fills_gaps_without_changing_other_orders() {
+    for layout in [0, 1] {
+        let model = gap_fixture();
+        let mut state = status(layout);
+        state.now = at("2026-10-25T06:30:00Z");
+        let mut ui = arena();
+        let smart = source_with(&model, 1, gap_rank);
+        assert_eq!(unsafe { note4_ui_build(&mut *ui, &smart, &state) }, 0);
+        let baseline = draw(&ui, &state, 0);
+        let mut repeated = arena();
+        assert_eq!(unsafe { note4_ui_build(&mut *repeated, &smart, &state) }, 0);
+        assert_eq!(draw(&repeated, &state, 0), baseline, "adaptive layout retries remain stable");
+        let accounts: Vec<_> = ui.rows[..ui.count].iter()
+            .filter(|row| row.kind == Kind::Account)
+            .map(|row| (ui.row_text(row), row.page, row.x, row.y))
+            .collect();
+        assert_eq!(accounts.iter().filter(|(text, _, _, _)| *text == "A").count(), 1);
+        assert_eq!(accounts.iter().filter(|(text, _, _, _)| *text == "B").count(), 1);
+        assert_eq!(accounts.iter().filter(|(text, _, _, _)| *text == "C").count(), 1);
+        let a = accounts.iter().find(|(text, _, _, _)| *text == "A").unwrap();
+        let b = accounts.iter().find(|(text, _, _, _)| *text == "B").unwrap();
+        let c = accounts.iter().find(|(text, _, _, _)| *text == "C").unwrap();
+        assert!(c.1 == a.1 && c.2 == a.2 && c.3 > a.3, "C fills A's remaining space: {accounts:?}");
+        assert!(b.1 > c.1 || b.2 != c.2, "B remains after the filled gap: {accounts:?}");
+        for frame in ui.rows[..ui.count].iter().filter(|row| row.kind == Kind::Frame) {
+            assert!(frame.x >= MARGIN && frame.x + frame.width <= WIDTH - MARGIN);
+            assert!(frame.y >= CARD_TOP && frame.y + frame.height as i16 <= CARD_BOTTOM);
+        }
+
+        let mut normal = arena();
+        let ordinary = source_with(&model, 0, gap_rank);
+        assert_eq!(unsafe { note4_ui_build(&mut *normal, &ordinary, &state) }, 0);
+        let normal_accounts: Vec<_> = normal.rows[..normal.count].iter()
+            .filter(|row| row.kind == Kind::Account)
+            .map(|row| normal.row_text(row).to_string())
+            .collect();
+        let smart_accounts: Vec<_> = ui.rows[..ui.count].iter()
+            .filter(|row| row.kind == Kind::Account)
+            .map(|row| ui.row_text(row).to_string())
+            .collect();
+        assert_eq!(normal_accounts.len(), smart_accounts.len());
+        assert_ne!(normal_accounts, smart_accounts, "non-Smart layout keeps the original behavior");
+    }
 }
 
 #[test]
