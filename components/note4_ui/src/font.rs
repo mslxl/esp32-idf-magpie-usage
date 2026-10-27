@@ -83,6 +83,16 @@ impl Canvas<'_> {
         self.rect(x, y, 1, h);
         self.rect(x + w - 1, y, 1, h);
     }
+    /// One-pixel outline with corners clipped to a 2px radius.
+    pub fn round_frame(&mut self, x: i16, y: i16, w: i16, h: i16) {
+        self.rect(x + 2, y, w - 4, 1);
+        self.rect(x + 2, y + h - 1, w - 4, 1);
+        self.rect(x, y + 2, 1, h - 4);
+        self.rect(x + w - 1, y + 2, 1, h - 4);
+        for (px, py) in [(x + 1, y + 1), (x + w - 2, y + 1), (x + 1, y + h - 2), (x + w - 2, y + h - 2)] {
+            self.pixel(px, py);
+        }
+    }
     pub fn text(&mut self, text: &str, x: i16, y: i16, size: u8, bold: bool) {
         self.text_ink(text, x, y, size, bold, true);
     }
@@ -107,6 +117,25 @@ impl Canvas<'_> {
                 }
             }
             x += advance_weight(cp,size,bold);
+        }
+    }
+    /// Swaps black and white inside a rectangle.
+    pub fn invert(&mut self, x: i16, y: i16, w: i16, h: i16) {
+        for py in y.max(0)..(y + h).min(HEIGHT) {
+            for px in x.max(0)..(x + w).min(WIDTH) {
+                self.0[py as usize * STRIDE + px as usize / 8] ^= 0x80 >> (px % 8);
+            }
+        }
+    }
+    /// 12x12 clock outline with hands at three o'clock.
+    pub fn clock(&mut self, x: i16, y: i16) {
+        const CLOCK: [u16; 12] = [0x0F00, 0x30C0, 0x4020, 0x4420, 0x8410, 0x8410, 0x87D0, 0x8010, 0x4020, 0x4020, 0x30C0, 0x0F00];
+        for (py, row) in CLOCK.iter().enumerate() {
+            for px in 0..12 {
+                if row & (0x8000 >> px) != 0 {
+                    self.pixel(x + px, y + py as i16);
+                }
+            }
         }
     }
     pub fn icon(&mut self, id: u8, x: i16, y: i16) {

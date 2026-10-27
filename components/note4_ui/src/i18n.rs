@@ -46,6 +46,7 @@ macro_rules! messages {
 messages! {
     // Quota page header and page-level states.
     Title => "Magpie Usage", "Magpie 用量";
+    QuotaTitle => "Quota", "额度";
     OfflineBanner => "Last data - offline; reconnecting", "上次数据 · 离线，正在重连";
     OfflineRetryBanner => "Last data - offline; retrying in {} min", "上次数据 · 离线，{} 分钟后重试";
     RetryBanner => "Last data - request failed; retrying", "上次数据 · 请求失败，正在重试";
@@ -73,7 +74,6 @@ messages! {
     QuotaUnknown => "Current quota unknown", "当前额度未知";
     Unlimited => "Unlimited", "无限";
     Unknown => "Unknown", "未知";
-    Remaining => "{}% left", "剩余 {}%";
     Used => "{}% used", "已用 {}%";
     ResetsAt => "Resets {}", "重置 {}";
     ResetsIn => "Resets in {} s", "{} 秒后重置";

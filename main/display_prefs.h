@@ -3,6 +3,8 @@
 #include "account_directory.h"
 #include <stdatomic.h>
 typedef struct { const char *provider, *user; } note4_account_identity_t;
+/* `kinds` bits 0-3 select card kinds; this bit hides cards without windows, balances or an error. */
+#define NOTE4_DISPLAY_HIDE_EMPTY 16U
 typedef struct note4_display_prefs {
     atomic_uint references;
     uint8_t *bytes;

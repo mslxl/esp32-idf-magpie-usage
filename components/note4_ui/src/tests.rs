@@ -101,7 +101,9 @@ fn prototype_fixture() -> Fixture {
         ("CLAUDE","studio@example.test","Max",vec![("会话","61","2026-10-25T09:00:00Z"),("每周","36","2026-10-29T00:00:00Z")]),
         ("DEEPSEEK","API 项目","余额",vec![]),
     ].into_iter().map(|(provider,user,plan,windows)| {
-        let mut data=fields(&[("provider",provider),("user",user),("plan",plan),("readAt","2026-10-25T06:30:00Z")]);
+        // DeepSeek was read earlier than the header time, so only its card keeps a stamp.
+        let read=if provider=="DEEPSEEK" {"2026-10-25T06:25:00Z"} else {"2026-10-25T06:30:00Z"};
+        let mut data=fields(&[("provider",provider),("user",user),("plan",plan),("readAt",read)]);
         if provider=="DEEPSEEK" {data.insert("balance",CString::new("¥ 128.60").unwrap());}
         Card { fields:data, windows:windows.into_iter().map(|(name,used,resets)|fields(&[("name",name),("used",used),("resetsAt",resets)])).collect() }
     }).collect() }
@@ -118,10 +120,10 @@ fn compact_cards_have_complete_borders_and_preserve_every_page() {
         assert_eq!(ui.pages,if layout==0 {2}else{1});
         for page in 0..ui.pages {
             let pixels=draw(&ui,&state,page);
-            assert!((8..if layout==0 {392}else{196}).all(|x|pixels[40*400+x]==0),"first card top border");
+            assert!((10..if layout==0 {390}else{194}).all(|x|pixels[CARD_TOP as usize*400+x]==0),"first card top border");
             let border_x=if layout==0 {391}else{195};
-            assert!((40..60).all(|y|pixels[y*400+8]==0 && pixels[y*400+border_x]==0));
-            if layout==1 {assert!((204..392).all(|x|pixels[40*400+x]==0));}
+            assert!((CARD_TOP as usize+2..60).all(|y|pixels[y*400+8]==0 && pixels[y*400+border_x]==0));
+            if layout==1 {assert!((206..390).all(|x|pixels[CARD_TOP as usize*400+x]==0));}
             artifact(&format!("prototype-{}-{page}",if layout==0 {"A"}else{"B"}),&pixels);
         }
     }
@@ -138,10 +140,12 @@ fn battery_states_update_only_the_header_and_preserve_card_layout() {
         for (name,percent,flags) in [("empty",0,1),("low",8,1),("half",50,1),("full",100,5),("charging",50,3),("unknown",0,0)] {
             state.battery_percent=percent;state.battery_flags=flags;
             let pixels=draw(&ui,&state,0);
-            assert_eq!(&pixels[33*400..],&baseline[33*400..],"battery must not change cards or footer");
-            assert!((363..388).all(|x|pixels[10*400+x]==0),"battery outline");
-            assert!((14..20).all(|y|pixels[y*400+390]==0),"battery terminal");
-            let header=pixels[..33*400].to_vec();
+            assert_eq!(&pixels[HEADER_HEIGHT as usize*400..],&baseline[HEADER_HEIGHT as usize*400..],"battery must not change cards or footer");
+            // The header band is inverted, so the battery is drawn in white.
+            assert!((363..388).all(|x|pixels[10*400+x]!=0),"battery outline");
+            assert!((14..20).all(|y|pixels[y*400+390]!=0),"battery terminal");
+            assert!(pixels[2*400+200]==0,"inverted header band");
+            let header=pixels[..HEADER_HEIGHT as usize*400].to_vec();
             assert!(!headers.contains(&header),"each power state must be visually distinct");
             headers.push(header);
             artifact(&format!("battery-{}-{name}",if layout==0 {"A"}else{"B"}),&pixels);
@@ -221,18 +225,23 @@ fn one_window(used: &str, read_key: &'static str, read: &str) -> Fixture {
     }] }
 }
 fn zh(mut state: Status) -> Status { state.language = 1; state }
+/// Adds a card read later, so the first card's update time differs from the header's.
+fn with_newer(mut model: Fixture) -> Fixture {
+    model.cards.push(Card { fields: fields(&[("provider", "Claude"), ("user", "newer"), ("readAt", "2026-10-25T07:00:00Z")]), windows: vec![] });
+    model
+}
 
 #[test]
 fn card_text_follows_the_display_language() {
-    let model = one_window("42", "readAt", "2026-10-25T06:30:00Z");
+    let model = with_newer(one_window("42", "readAt", "2026-10-25T06:30:00Z"));
     let mut state = status(0);
     state.now = at("2026-10-25T06:30:00Z");
     let en = texts(&build(&model, &state));
-    for expected in ["58% left", "Resets Today 16:00", "Updated 14:30"] {
+    for expected in ["58%", "Resets Today 16:00", "Updated 14:30"] {
         assert!(en.iter().any(|t| t == expected), "{expected} in {en:?}");
     }
     let cn = texts(&build(&model, &zh(state)));
-    for expected in ["剩余 58%", "重置 今天 16:00", "更新 14:30"] {
+    for expected in ["58%", "重置 今天 16:00", "更新 14:30"] {
         assert!(cn.iter().any(|t| t == expected), "{expected} in {cn:?}");
     }
     let mut state = status(0);
@@ -246,7 +255,7 @@ fn card_text_follows_the_display_language() {
 
 #[test]
 fn updated_time_is_absolute_and_stable_within_the_day() {
-    let model = one_window("42", "readAt", "2026-10-24T06:30:00Z");
+    let model = with_newer(one_window("42", "readAt", "2026-10-24T06:30:00Z"));
     let mut state = status(0);
     state.now = at("2026-10-25T06:30:00Z");
     let before = draw(&build(&model, &state), &state, 0);
@@ -258,7 +267,7 @@ fn updated_time_is_absolute_and_stable_within_the_day() {
     let cached = one_window("42", "asOf", "2026-10-25T06:30:00Z");
     assert!(texts(&build(&cached, &state)).iter().any(|t| t == "Updated 14:30 · cached"));
     assert!(texts(&build(&cached, &zh(status_at(&state)))).iter().any(|t| t == "更新 14:30 · 缓存"));
-    let mut deferred = one_window("42", "readAt", "2026-10-25T06:30:00Z");
+    let mut deferred = with_newer(one_window("42", "readAt", "2026-10-25T06:30:00Z"));
     deferred.cards[0].fields.insert("readDeferred", CString::new("true").unwrap());
     assert!(texts(&build(&deferred, &state)).iter().any(|t| t == "Updated 14:30 · not refreshed"));
 }
@@ -289,10 +298,16 @@ fn low_remaining_quota_is_inverted_and_bars_are_outlined() {
         assert_eq!(right.alert, alert, "used {used}");
         let corner = pixels[(right.y + 1) as usize * 400 + (right.x + right.width - 2) as usize];
         assert_eq!(corner == 0, alert, "inverted label background for used {used}");
-        let bar = rows.iter().find(|row| row.kind == Kind::Bar).unwrap();
-        let (x, y) = (bar.x as usize, (bar.y + BAR_TOP) as usize);
-        assert!((y..y + BAR_HEIGHT as usize).all(|py| pixels[py * 400 + x] == 0), "left outline");
-        assert!(pixels[(y + 4) * 400 + x + 1] != 0, "white gap inside the outline");
+        let bar = rows.iter().find(|row| row.kind == Kind::InlineBar).unwrap();
+        let (x, y) = (bar.x as usize, bar_y(bar) as usize);
+        assert!(beside(bar, right), "bar shares the quota row");
+        assert!((y + 2..y + BAR_HEIGHT as usize - 2).all(|py| pixels[py * 400 + x] == 0), "left outline");
+        // Low quota doubles the outline; otherwise a white gap separates it from the fill.
+        assert_eq!(pixels[(y + 4) * 400 + x + 1] == 0, alert, "outline weight for used {used}");
+        if alert {
+            let end = x + bar.width as usize - 3;
+            assert!((x + 20..end).any(|px| pixels[(y + 4) * 400 + px] != 0), "hatched used part");
+        }
         assert!(pixels[(y + 4) * 400 + x + 2] == 0, "remaining fill");
         if alert { artifact(&format!("low-{used}"), &pixels); }
     }
@@ -334,5 +349,35 @@ fn draw_status(ui: &Ui, state: &Status) -> Vec<u16> {
     assert_eq!(unsafe { note4_ui_draw(ui, state, 0, 0, frame.as_mut_ptr(), frame.len()) }, 0);
     (0..400 * 300).map(|i| if frame[i / 8] & (0x80 >> (i % 8)) != 0 { 0 } else { 65535 }).collect()
 }
+/// The inline bar lies within the vertical span of the quota text beside it.
+fn beside(bar: &Row, quota: &Row) -> bool {
+    bar.y > quota.y && bar.y + BAR_HEIGHT < quota.y + line_height(quota.size) as i16
+}
 fn status_storage(code: u32) -> Status { let mut s = status(0); s.storage_error = code; s }
 fn status_wifi(seconds: u32) -> Status { let mut s = status(0); s.state = 6; s.wifi_retry_seconds = seconds; s }
+
+#[test]
+fn compact_cards_share_rows_and_fill_the_first_page() {
+    let model = prototype_fixture();
+    let mut state = status(0);
+    state.now = at("2026-10-25T06:30:00Z");
+    let ui = build(&model, &state);
+    let rows = &ui.rows[..ui.count];
+    let frames = rows.iter().filter(|row| row.kind == Kind::Frame && row.page == 0).count();
+    assert_eq!(frames, 3, "three full-width cards on the first page");
+    for bar in rows.iter().filter(|row| row.kind == Kind::InlineBar) {
+        assert!(rows.iter().any(|row| row.kind == Kind::Right && beside(bar, row) && row.page == bar.page), "bar beside its quota");
+    }
+    assert!(!rows.iter().any(|row| row.kind == Kind::Bar), "wide cards need no separate bar rows");
+    // Update times matching the header are hidden; an older one stays beside the heading.
+    assert!(!texts(&ui).iter().any(|t| t == "Updated 14:30"), "header already shows 14:30");
+    assert!(rows.iter().any(|row| row.kind == Kind::Stamp && ui.row_text(row) == "Updated 14:25"));
+    // In a narrow column the update time falls back to its own row when it cannot share one.
+    let ui = build(&model, &status_at(&{ let mut s = status(1); s.now = state.now; s }));
+    let rows = &ui.rows[..ui.count];
+    assert!(rows.iter().any(|row| row.kind == Kind::Meta && ui.row_text(row) == "Updated 14:25"));
+    // While the header shows the state instead of the time, every card keeps its own.
+    let mut failed = state; failed.phase = phase::FAILED;
+    let ui = build(&model, &failed);
+    assert!(texts(&ui).iter().any(|t| t == "Updated 14:30"));
+}

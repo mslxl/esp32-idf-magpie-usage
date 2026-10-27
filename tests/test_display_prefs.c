@@ -49,7 +49,21 @@ int main(void) {
     CHECK(!note4_display_prefs_visible(prefs, snapshot, 2));
     CHECK(note4_display_prefs_visible(prefs, snapshot, 3));
     note4_quota_snapshot_release(snapshot); note4_display_prefs_release(prefs);
-    const char *queries[] = {" strasse ", "\tSTRASSE\r\n", "\xc2\xa0strasse\xe3\x80\x80", "\xef\xbb\xbfSTRASSE\xe2\x80\xaf"};
+    const uint8_t bounded[] = {2,0,0,32, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0};
+    prefs = NULL; CHECK(note4_display_prefs_parse(bounded, sizeof(bounded), &prefs) == NOTE4_BLE_ERR_VALIDATION && prefs == NULL);
+    const uint8_t hide_empty[] = {2,0,0,15 | NOTE4_DISPLAY_HIDE_EMPTY, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0};
+    CHECK(note4_display_prefs_parse(hide_empty, sizeof(hide_empty), &prefs) == NOTE4_BLE_OK);
+    const char *mixed = "[{\"provider\":\"Codex\",\"user\":\"empty\"},"
+        "{\"provider\":\"Codex\",\"user\":\"window\",\"windows\":[{\"name\":\"5h\",\"used\":10}]},"
+        "{\"provider\":\"Codex\",\"user\":\"money\",\"balance\":\"$5\"},"
+        "{\"provider\":\"Codex\",\"user\":\"broken\",\"error\":\"timeout\"}]";
+    CHECK(note4_quota_snapshot_parse(mixed, strlen(mixed), &snapshot) == NOTE4_QUOTA_OK);
+    CHECK(!note4_display_prefs_visible(prefs, snapshot, 0));
+    CHECK(note4_display_prefs_visible(prefs, snapshot, 1));
+    CHECK(note4_display_prefs_visible(prefs, snapshot, 2));
+    CHECK(note4_display_prefs_visible(prefs, snapshot, 3));
+    note4_quota_snapshot_release(snapshot); note4_display_prefs_release(prefs);
+    const char *queries[] ={" strasse ", "\tSTRASSE\r\n", "\xc2\xa0strasse\xe3\x80\x80", "\xef\xbb\xbfSTRASSE\xe2\x80\xaf"};
     for (size_t i = 0; i < sizeof(queries) / sizeof(queries[0]); ++i) {
         uint8_t document[128] = {2,0,0,15};
         const size_t length = strlen(queries[i]); put32(document + 4, (uint32_t)length);

@@ -118,7 +118,7 @@ note4_ble_status_t note4_display_prefs_parse(const uint8_t *bytes, size_t length
     if (length > NOTE4_DOCUMENT_BUDGET || !note4_resource_available(length * 4U + sizeof(note4_display_prefs_t)))
         return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     if (bytes[0] != 2U) return NOTE4_BLE_ERR_UNSUPPORTED_SCHEMA;
-    if (bytes[1] > 2U || bytes[2] > 1U || bytes[3] > 15U) return NOTE4_BLE_ERR_VALIDATION;
+    if (bytes[1] > 2U || bytes[2] > 1U || bytes[3] > 31U) return NOTE4_BLE_ERR_VALIDATION;
     note4_display_prefs_t *prefs = note4_external_calloc(1U, sizeof(*prefs));
     if (prefs == NULL) return NOTE4_BLE_ERR_RESOURCE_EXHAUSTED;
     atomic_init(&prefs->references, 1U); prefs->bytes = note4_external_malloc(length); prefs->text = note4_external_malloc(length + 1U);
@@ -165,6 +165,9 @@ bool note4_display_prefs_visible(const note4_display_prefs_t *prefs, const note4
     unsigned bit = !strcmp(kind, "subscription") ? 1U : !strcmp(kind, "plan") ? 2U : !strcmp(kind, "balance") ? 4U : 8U;
     if (!kind[0] && note4_quota_text(snapshot, card, "balance")[0] && !note4_quota_window_count(snapshot, card)) bit = 4U;
     if (!(prefs->kinds & bit)) return false;
+    if ((prefs->kinds & NOTE4_DISPLAY_HIDE_EMPTY) && !note4_quota_window_count(snapshot, card) &&
+        !note4_quota_balance_count(snapshot, card) && !note4_quota_text(snapshot, card, "balance")[0] &&
+        !note4_quota_text(snapshot, card, "error")[0]) return false;
     if (!prefs->query[0]) return true;
     static const char *const fields[] = {"user", "alias", "seat", "name"};
     for (unsigned i = 0U; i < 4U; ++i) if (contains_folded(note4_quota_text(snapshot, card, fields[i]), prefs->query)) return true;

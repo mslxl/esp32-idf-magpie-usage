@@ -162,10 +162,15 @@ it("shows the full account directory including repeated exact identities and ori
   hidden[0].click();
   await flush();
   expect(hidden[0].checked).toBe(true); expect(hidden[1].checked).toBe(true);
+  const hideEmpty = root.querySelector<HTMLInputElement>("#hide-empty")!;
+  expect(hideEmpty.checked).toBe(false); expect(root.textContent).toContain("Hide all cards without quota");
+  hideEmpty.click();
+  await flush();
   button(root, "Save account display preferences").click();
   await vi.waitFor(() => expect(status(root)).toContain("Account display preferences saved"));
   const submitted = transport.send.mock.calls.filter(([opcode]) => opcode === Opcode.PutDisplayPrefsChunk);
   expect(decodeDisplayPrefs(submitted[0][1]!.subarray(5)).hidden).toEqual([{ provider: "厂商", user: "same" }]);
+  expect(decodeDisplayPrefs(submitted[0][1]!.subarray(5)).hideEmpty).toBe(true);
   expect(transport.send.mock.calls.some(([opcode]) => opcode === Opcode.FinishDisplayPrefs)).toBe(true);
   expect(transport.send.mock.calls.at(-1)![0]).toBe(Opcode.Commit);
   hidden[1].click();

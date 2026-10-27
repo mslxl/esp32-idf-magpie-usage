@@ -29,32 +29,65 @@ const COLUMN_GAP: i16 = 8;
 const FULL_WIDTH: i16 = WIDTH - 2 * MARGIN;
 const HALF_WIDTH: i16 = (FULL_WIDTH - COLUMN_GAP) / 2;
 const COLUMN_STEP: i16 = HALF_WIDTH + COLUMN_GAP;
-const HEADER_RULE_Y: i16 = 33;
-const BANNER_Y: i16 = 36;
-const CARD_TOP: i16 = 40;
-const BANNER_TOP: i16 = 64;
+/// Inverted header band; state messages replace the title inside it.
+const HEADER_HEIGHT: i16 = 28;
+/// Baseline of header text.
+const HEADER_BASELINE: i16 = 23;
+const CARD_TOP: i16 = HEADER_HEIGHT + 4;
 const CARD_BOTTOM: i16 = font::HEIGHT - MARGIN;
 const EMPTY_MESSAGE_Y: i16 = 100;
 
 // Card geometry.
-const PADDING: i16 = 4;
-const CARD_SPACING: i16 = 5;
+const PADDING: i16 = 3;
+const CARD_SPACING: i16 = 3;
 /// Room for the provider icon before a heading.
 const ICON_SPACE: i16 = 20;
+/// White space after the provider name inside its inverted label.
+const CHIP_PAD: i16 = 4;
 /// Provider and account rows repeated at the top of a continued card.
 const CONTINUATION_RESERVE: i16 = 48;
 const BAR_HEIGHT: i16 = 8;
-const BAR_TOP: i16 = 2;
+const BAR_TOP: i16 = 1;
+/// Narrowest bar drawn between a window name and its quota.
+const INLINE_BAR_MIN: i16 = 32;
+/// Gap around inline bars and right-aligned overlays.
+const GAP: i16 = 6;
+
+/// Page indicator: dots up to this many pages, then "n / m".
+const MAX_PAGE_DOTS: u32 = 10;
+const PAGE_DOT: i16 = 7;
+const PAGE_DOT_STEP: i16 = 11;
 
 // Type sizes.
 const TITLE_SIZE: u8 = 18;
 const PAGE_SIZE: u8 = 16;
+/// Remaining percentage beside the quota bar.
+const QUOTA_SIZE: u8 = 18;
 const META_SIZE: u8 = 14;
 const BODY_SIZES: [u8; 3] = [16, 15, 14];
 
 /// Remaining quota at or below this percentage is drawn inverted.
 const LOW_REMAINING: f32 = 15.0;
 const CREDENTIAL_LABELS: [&str; 4] = ["api key", "api_key", "api-key", "token"];
+
+/// `value` shortened with "..." to fit `limit` in bold `size`.
+fn fit(value: &str, size: u8, limit: i16) -> Text {
+    let mut out = Text::new();
+    if measure_weight(value, size, true) <= limit {
+        out.push(value);
+        return out;
+    }
+    for ch in value.chars() {
+        let mut scalar = [0; 4];
+        let next = ch.encode_utf8(&mut scalar);
+        if measure_weight(out.as_str(), size, true) + measure_weight(next, size, true) + measure_weight("...", size, true) > limit {
+            break;
+        }
+        out.push(next);
+    }
+    out.push("...");
+    out
+}
 
 /// Mirrors `note4_provisioning_state_t`.
 mod state {
@@ -308,16 +341,9 @@ impl Status {
     fn lang(&self) -> Lang {
         Lang::from_code(self.language)
     }
-    /// Cached quotas are shown below a "last data" banner while offline or failing.
+    /// Cached quotas stay visible while the header reports the offline or failing state.
     fn banner(&self) -> bool {
         self.state != state::CONNECTED || self.phase == phase::FAILED
-    }
-    fn top(&self) -> i16 {
-        if self.banner() {
-            BANNER_TOP
-        } else {
-            CARD_TOP
-        }
     }
     /// Whether quota pages (rather than a full-screen status page) are shown.
     fn quotas(&self) -> bool {
@@ -344,6 +370,11 @@ enum Kind {
     Window,
     /// Right-aligned quota, drawn on the preceding window row.
     Right,
+    /// Quota bar between the window name and its quota, on the same row.
+    InlineBar,
+    InlineUnknownBar,
+    /// Right-aligned update time on the card's first row.
+    Stamp,
     Account,
     /// Plan drawn after the account name on the same row.
     Plan,
@@ -357,25 +388,36 @@ enum Kind {
 impl Kind {
     /// Overlay rows share the vertical position of the row before them.
     fn overlay(self) -> bool {
-        matches!(self, Kind::Right | Kind::Plan)
+        matches!(self, Kind::Right | Kind::Plan | Kind::InlineBar | Kind::InlineUnknownBar | Kind::Stamp)
     }
     fn takes_space(self) -> bool {
-        !matches!(self, Kind::Right | Kind::Plan | Kind::Frame)
+        !self.overlay() && self != Kind::Frame
     }
     fn bold(self) -> bool {
         matches!(self, Kind::Provider | Kind::Account | Kind::Right | Kind::Bold)
     }
     fn height(self, size: u8) -> u8 {
         match self {
-            Kind::Right | Kind::Plan | Kind::Frame => 0,
-            Kind::Bar | Kind::UnknownBar => (BAR_TOP + BAR_HEIGHT) as u8,
-            Kind::Rule => 5,
-            Kind::Provider => 19,
-            Kind::Account | Kind::Meta => 18,
-            Kind::Reset => 17,
+            Kind::Right | Kind::Plan | Kind::InlineBar | Kind::InlineUnknownBar | Kind::Stamp | Kind::Frame => 0,
+            Kind::Bar | Kind::UnknownBar => (BAR_TOP + BAR_HEIGHT + 1) as u8,
+            Kind::Rule => 3,
+            Kind::Provider => 17,
+            Kind::Account => line_height(size),
+            Kind::Meta | Kind::Reset => line_height(META_SIZE),
             Kind::Body | Kind::Window | Kind::Bold => line_height(size),
         }
     }
+}
+/// Top of a quota bar; inline bars are positioned during placement.
+fn bar_y(row: &Row) -> i16 {
+    match row.kind {
+        Kind::InlineBar | Kind::InlineUnknownBar => row.y,
+        _ => row.y + BAR_TOP,
+    }
+}
+/// Baseline offset below the `y` passed to text drawing (glyphs are drawn at `row.y - 1`).
+fn text_top(size: u8) -> i16 {
+    size as i16 - 1
 }
 fn line_height(size: u8) -> u8 {
     ((size as u16 * 115 + 50) / 100) as u8
@@ -402,6 +444,8 @@ struct Row {
     alert: bool,
     /// Rows of one quota window share a non-zero group and stay on one page.
     group: u16,
+    /// Horizontal offset of an inline bar from the card's text column.
+    dx: i16,
 }
 
 #[repr(C)]
@@ -420,6 +464,8 @@ pub struct Ui {
     order_count: usize,
     /// Earliest instant at which time-dependent wording in this layout changes.
     next_change: i64,
+    /// Latest update time among visible cards, shown in the header; 0 when unknown.
+    updated: i64,
 }
 
 /// Where the next card starts.
@@ -477,6 +523,7 @@ impl Ui {
             progress,
             alert: false,
             group: 0,
+            dx: 0,
         };
         self.bytes += text.len();
         self.count += 1;
@@ -488,7 +535,7 @@ impl Ui {
     /// Wraps `value` into rows; glyphs missing from the font appear as `[U+XXXX]`.
     fn line_weight(&mut self, value: &str, width: i16, size: u8, header: bool, icon: u8, bold: bool) -> Result<(), ()> {
         let kind = if header { Kind::Provider } else { Kind::Body };
-        let limit = width - if header { ICON_SPACE } else { 1 };
+        let limit = width - if header { ICON_SPACE + CHIP_PAD } else { 1 };
         let mut line = Text::new();
         let mut used = 0;
         for cp in value.chars() {
@@ -563,13 +610,31 @@ impl Ui {
         if fits {
             self.add(plan, width, META_SIZE, Kind::Plan, 0, 0)
         } else {
-            let start = self.count;
-            self.styled(plan, width, META_SIZE, Kind::Meta)?;
-            for row in &mut self.rows[start..self.count] {
-                row.height = 20;
-            }
-            Ok(())
+            self.styled(plan, width, META_SIZE, Kind::Meta)
         }
+    }
+    /// Adds `stamp` right-aligned on row `first` when that is the only row since
+    /// `first` and both fit side by side.
+    fn stamp(&mut self, first: usize, stamp: &str, width: i16) -> Result<bool, ()> {
+        if first >= self.count || self.height(first + 1, self.count) != 0 {
+            return Ok(false);
+        }
+        let used: i16 = self.rows[first..self.count]
+            .iter()
+            .map(|row| {
+                let text = self.row_text(row);
+                match row.kind {
+                    Kind::Plan => PADDING + measure(text, row.size),
+                    Kind::Provider => ICON_SPACE + measure_weight(text, row.size, true) + CHIP_PAD,
+                    kind => measure_weight(text, row.size, kind.bold()),
+                }
+            })
+            .sum();
+        if used + GAP + measure(stamp, META_SIZE) > width {
+            return Ok(false);
+        }
+        self.add(stamp, width, META_SIZE, Kind::Stamp, 0, 0)?;
+        Ok(true)
     }
     fn formatted(&mut self, value: &Text, width: i16) -> Result<(), ()> {
         if value.overflow {
@@ -607,15 +672,42 @@ impl Ui {
     fn card(&mut self, source: &Source, index: usize, card: &Card<'_>, width: i16, heading: bool, status: &Status) -> Result<(), ()> {
         let lang = status.lang();
         let provider = card.provider;
+        // The update time sits beside the heading or account when there is room.
+        let cached = !card.as_of.is_empty();
+        let value = if cached { card.as_of } else { card.read_at };
+        // A plain update time in the same minute as the header's adds nothing.
+        let repeated = !status.banner()
+            && !cached
+            && !card.read_deferred
+            && self.updated != 0
+            && time::instant(value).is_some_and(|at| at.div_euclid(60) == self.updated.div_euclid(60));
+        let updated = if !value.is_empty() && !repeated {
+            Some(time::updated(lang, value, cached, card.read_deferred, status.now, status.zone()))
+        } else {
+            None
+        };
+        if updated.as_ref().is_some_and(|text| text.overflow) {
+            return Err(());
+        }
+        let updated = updated.as_ref().map(Text::as_str);
+        let mut stamped = updated.is_none();
         if heading {
             let title = if card.name.eq_ignore_ascii_case(provider) { card.name } else { provider };
+            let first = self.count;
             self.line(title, width, META_SIZE, true, font::icon(provider))?;
+            if let Some(updated) = updated {
+                stamped = self.stamp(first, updated, width)?;
+            }
         }
         let user = card.user.trim();
         let plan = card.plan.trim();
         let show_user = !user.is_empty() && !user.eq_ignore_ascii_case(provider) && !is_credential_label(user);
         let show_plan = !plan.eq_ignore_ascii_case(provider) && !plan.eq_ignore_ascii_case(user);
+        let first = self.count;
         self.identity(if show_user { user } else { "" }, if show_plan { plan } else { "" }, width)?;
+        if let (false, Some(updated)) = (stamped, updated) {
+            stamped = self.stamp(first, updated, width)?;
+        }
 
         // Secondary names, skipping any value already shown.
         let mut seen = [provider, user, plan, "", "", "", "", ""];
@@ -665,16 +757,14 @@ impl Ui {
         if card.windows == 0 && card.balance.is_empty() && !card.failed {
             self.styled(Msg::NoWindows.text(lang), width, META_SIZE, Kind::Meta)?;
         }
-        if !card.as_of.is_empty() || !card.read_at.is_empty() {
-            let cached = !card.as_of.is_empty();
-            let value = if cached { card.as_of } else { card.read_at };
-            let updated = time::updated(lang, value, cached, card.read_deferred, status.now, status.zone());
-            self.meta(&updated, width, Kind::Meta)?;
+        if let (false, Some(updated)) = (stamped, updated) {
+            self.styled(updated, width, META_SIZE, Kind::Meta)?;
         }
         Ok(())
     }
 
-    /// One quota window: rule, name with remaining quota, bar, details and reset.
+    /// One quota window: rule, name with remaining quota and (when it fits) the
+    /// bar on one row, then details and reset.
     fn window(&mut self, window: &Window<'_>, width: i16, stale: bool, status: &Status) -> Result<(), ()> {
         let lang = status.lang();
         let window_start = self.count;
@@ -687,18 +777,20 @@ impl Ui {
         let used = window.used.parse::<f32>().ok().filter(|used| used.is_finite());
         let mut quota = Text::new();
         let mut left = None;
+        let mut quota_size = self.size;
         if expired {
             quota.push(Msg::QuotaUnknown.text(lang));
         } else if window.unlimited {
             quota.push(Msg::Unlimited.text(lang));
         } else if !window.remaining.is_empty() {
-            i18n::format(&mut quota, Msg::Remaining.text(lang), &[&window.remaining]);
+            // The bar shows the remaining share, so the number needs no label.
+            let _ = write!(quota, "{}%", window.remaining);
             left = window.remaining.parse::<f32>().ok();
+            quota_size = QUOTA_SIZE;
         } else if let Some(used) = used {
-            let mut number = Text::new();
-            let _ = write!(number, "{:.0}", (100.0 - used).max(0.0));
-            i18n::format(&mut quota, Msg::Remaining.text(lang), &[&number.as_str()]);
+            let _ = write!(quota, "{:.0}%", (100.0 - used).max(0.0));
             left = Some(100.0 - used);
+            quota_size = QUOTA_SIZE;
         } else {
             quota.push(Msg::Unknown.text(lang));
         }
@@ -708,30 +800,38 @@ impl Ui {
         let alert = left.is_some_and(|left| left <= LOW_REMAINING);
 
         let name = if window.name.is_empty() { Msg::QuotaWindow.text(lang) } else { window.name };
-        let quota_width = measure_weight(quota.as_str(), self.size, true) + if alert { 6 } else { 0 };
+        let name_width = if name.chars().all(|cp| font::covered(cp, self.size)) { measure(name, self.size) } else { width };
+        let quota_width = measure_weight(quota.as_str(), quota_size, true) + if alert { 6 } else { 0 };
         let quota_start;
-        if measure(name, self.size) + quota_width + 8 <= width {
+        let one_row = name_width + quota_width + 8 <= width;
+        if one_row {
+            // The larger quota shares the name's baseline and uses the line's leading.
             self.add(name, width, self.size, Kind::Window, 0, 0)?;
             quota_start = self.count;
-            self.add(quota.as_str(), width, self.size, Kind::Right, 0, 0)?;
+            self.add(quota.as_str(), width, quota_size, Kind::Right, 0, 0)?;
         } else {
             self.line(name, width, self.size, false, 0)?;
             quota_start = self.count;
-            self.styled(quota.as_str(), width, self.size, Kind::Bold)?;
+            self.styled(quota.as_str(), width, quota_size, Kind::Bold)?;
         }
         if alert {
             self.alert(quota_start);
         }
 
         if !expired && !window.unlimited {
-            match used {
-                Some(used) => {
-                    self.add("", width, self.size, Kind::Bar, 0, (100.0 - used).clamp(0.0, 100.0) as u8)?;
-                    if used > 100.0 {
-                        self.formatted(&i18n::message(lang, Msg::Used, &[&window.used]), width)?;
-                    }
-                }
-                None => self.add("", width, self.size, Kind::UnknownBar, 0, 0)?,
+            let progress = used.map_or(0, |used| (100.0 - used).clamp(0.0, 100.0) as u8);
+            let inline_width = width - name_width - quota_width - 2 * GAP;
+            if one_row && inline_width >= INLINE_BAR_MIN {
+                let kind = if used.is_some() { Kind::InlineBar } else { Kind::InlineUnknownBar };
+                self.add("", inline_width, self.size, kind, 0, progress)?;
+                self.rows[self.count - 1].dx = name_width + GAP;
+            } else {
+                let kind = if used.is_some() { Kind::Bar } else { Kind::UnknownBar };
+                self.add("", width, self.size, kind, 0, progress)?;
+            }
+            self.rows[self.count - 1].alert = alert;
+            if used.is_some_and(|used| used > 100.0) {
+                self.formatted(&i18n::message(lang, Msg::Used, &[&window.used]), width)?;
             }
         }
         self.line(window.display, width, self.size, false, 0)?;
@@ -761,9 +861,15 @@ impl Ui {
     fn collect(&mut self, source: &Source) -> Result<(), ()> {
         self.source_count = source.count;
         self.order_count = 0;
+        self.updated = 0;
         for index in 0..source.count {
             if (source.visible)(source.context, index) == 0 {
                 continue;
+            }
+            let card = source.card(index);
+            let value = if card.as_of.is_empty() { card.read_at } else { card.as_of };
+            if let Some(at) = time::instant(value) {
+                self.updated = self.updated.max(at);
             }
             if self.order_count == MAX_CARDS {
                 return Err(());
@@ -777,7 +883,7 @@ impl Ui {
 
     fn layout(&mut self, source: &Source, status: &Status, size: u8) -> Result<(), ()> {
         self.reset(size, status);
-        let top = status.top();
+        let top = CARD_TOP;
         let usable = CARD_BOTTOM - top;
         let two_columns = status.layout == layout::TWO_COLUMNS;
         let mut cursor = Cursor { page: 0, y: top, column: 0 };
@@ -839,7 +945,8 @@ impl Ui {
         let mut box_y = cursor.y;
         let mut x = MARGIN + cursor.column * COLUMN_STEP;
         let mut y = cursor.y + PADDING;
-        let mut overlay_y = y;
+        let mut baseline = y;
+        let mut baseline_size = self.size;
         let mut plan_x = x + PADDING;
         for at in start..end {
             let row = self.rows[at];
@@ -872,10 +979,17 @@ impl Ui {
             }
             let placed = &mut self.rows[at];
             placed.page = cursor.page;
-            placed.x = if row.kind == Kind::Plan { plan_x } else { x + PADDING };
-            placed.y = if row.kind.overlay() { overlay_y } else { y };
+            placed.x = if row.kind == Kind::Plan { plan_x } else { x + PADDING + row.dx };
+            placed.y = match row.kind {
+                // Overlay text shares the baseline of the row it sits on.
+                Kind::Plan | Kind::Stamp | Kind::Right => baseline - text_top(row.size),
+                // Inline bars are centred on the row's capital height.
+                Kind::InlineBar | Kind::InlineUnknownBar => baseline - baseline_size as i16 * 36 / 100 - BAR_HEIGHT / 2,
+                _ => y,
+            };
             if !row.kind.overlay() {
-                overlay_y = y;
+                baseline = y + text_top(row.size);
+                baseline_size = row.size;
                 if row.kind == Kind::Account {
                     plan_x = x + PADDING + measure_weight(self.row_text(&row), row.size, true) + PADDING;
                 }
@@ -907,7 +1021,7 @@ impl Ui {
     }
     /// Single row, shortened with "..." when it does not fit.
     fn compact(&mut self, value: &str, size: u8, kind: Kind, icon: u8, width: i16) -> Result<(), ()> {
-        let limit = width - if kind == Kind::Provider { ICON_SPACE } else { 1 };
+        let limit = width - if kind == Kind::Provider { ICON_SPACE + CHIP_PAD } else { 1 };
         let mut out = Text::new();
         for cp in value.chars() {
             let mut scalar = [0; 4];
@@ -934,21 +1048,7 @@ impl Ui {
             return;
         }
         let lang = status.lang();
-        canvas.text(Msg::Title.text(lang), MARGIN, 5, TITLE_SIZE, true);
-        let mut number = Text::new();
-        let _ = write!(number, "{} / {}", if self.pages == 0 { 0 } else { page + 1 }, self.pages);
-        let battery_left = status::battery(status, canvas, 10);
-        canvas.text(number.as_str(), battery_left - 12 - measure(number.as_str(), PAGE_SIZE), 7, PAGE_SIZE, false);
-        canvas.rect(MARGIN, HEADER_RULE_Y, FULL_WIDTH, 2);
-        if status.banner() {
-            let banner = if status.state == state::FAILURE && status.wifi_retry_seconds > 0 {
-                i18n::message(lang, Msg::OfflineRetryBanner, &[&status.wifi_retry_seconds.div_ceil(60)])
-            } else {
-                let msg = if status.state != state::CONNECTED { Msg::OfflineBanner } else { Msg::RetryBanner };
-                i18n::message(lang, msg, &[])
-            };
-            canvas.text(banner.as_str(), MARGIN, BANNER_Y, META_SIZE, false);
-        }
+        self.header(status, page, canvas);
         if self.pages == 0 {
             let empty = if self.source_count == 0 { Msg::NoQuotas } else { Msg::NoMatches };
             canvas.text(empty.text(lang), MARGIN, EMPTY_MESSAGE_Y, 16, false);
@@ -957,13 +1057,68 @@ impl Ui {
             self.draw_row(row, canvas);
         }
     }
+    /// Header drawn in black, then inverted into a white-on-black band.
+    fn header(&self, status: &Status, page: u32, canvas: &mut Canvas<'_>) {
+        let lang = status.lang();
+        let battery_left = status::battery(status, canvas, 10);
+        let mut right = battery_left - 12;
+        if self.pages > MAX_PAGE_DOTS {
+            let mut number = Text::new();
+            let _ = write!(number, "{} / {}", page + 1, self.pages);
+            right -= measure(number.as_str(), PAGE_SIZE);
+            canvas.text(number.as_str(), right, HEADER_BASELINE - PAGE_SIZE as i16, PAGE_SIZE, false);
+        } else if self.pages > 1 {
+            // One dot per page; the current page is filled.
+            right -= self.pages as i16 * PAGE_DOT_STEP - (PAGE_DOT_STEP - PAGE_DOT);
+            for index in 0..self.pages {
+                let x = right + index as i16 * PAGE_DOT_STEP;
+                canvas.round_frame(x, 14, PAGE_DOT, PAGE_DOT);
+                if index == page {
+                    canvas.rect(x + 1, 15, PAGE_DOT - 2, PAGE_DOT - 2);
+                }
+            }
+        }
+        let limit = right - 10 - MARGIN;
+        if status.banner() {
+            // The state replaces the title while cached quotas are shown.
+            let banner = if status.state == state::FAILURE && status.wifi_retry_seconds > 0 {
+                i18n::message(lang, Msg::OfflineRetryBanner, &[&status.wifi_retry_seconds.div_ceil(60)])
+            } else {
+                let msg = if status.state != state::CONNECTED { Msg::OfflineBanner } else { Msg::RetryBanner };
+                i18n::message(lang, msg, &[])
+            };
+            let size = if measure_weight(banner.as_str(), PAGE_SIZE, true) <= limit { PAGE_SIZE } else { META_SIZE };
+            let text = fit(banner.as_str(), size, limit);
+            canvas.text(text.as_str(), MARGIN, HEADER_BASELINE - size as i16, size, true);
+        } else {
+            let mut title = Text::new();
+            title.push(Msg::QuotaTitle.text(lang));
+            let time = (self.updated != 0).then(|| time::hhmm(self.updated, status.zone())).flatten();
+            if time.is_some() {
+                title.push(" - ");
+            }
+            let y = HEADER_BASELINE - TITLE_SIZE as i16;
+            canvas.text(title.as_str(), MARGIN, y, TITLE_SIZE, true);
+            if let Some(time) = time {
+                let x = MARGIN + measure_weight(title.as_str(), TITLE_SIZE, true);
+                canvas.clock(x, HEADER_BASELINE - 13);
+                canvas.text(time.as_str(), x + 16, y, TITLE_SIZE, true);
+            }
+        }
+        canvas.invert(0, 0, font::WIDTH, HEADER_HEIGHT);
+    }
     fn draw_row(&self, row: &Row, canvas: &mut Canvas<'_>) {
         match row.kind {
-            Kind::Frame => canvas.frame(row.x, row.y, row.width, row.height as i16),
-            Kind::Rule => canvas.rect(row.x, row.y + 2, row.width, 1),
-            Kind::Bar | Kind::UnknownBar => {
-                let (x, y, w) = (row.x, row.y + BAR_TOP, row.width);
-                if row.kind == Kind::UnknownBar {
+            Kind::Frame => canvas.round_frame(row.x, row.y, row.width, row.height as i16),
+            // Dotted, so window separators stay lighter than card borders.
+            Kind::Rule => {
+                for dx in (0..row.width).step_by(3) {
+                    canvas.pixel(row.x + dx, row.y + 1);
+                }
+            }
+            Kind::Bar | Kind::UnknownBar | Kind::InlineBar | Kind::InlineUnknownBar => {
+                let (x, y, w) = (row.x, bar_y(row), row.width);
+                if matches!(row.kind, Kind::UnknownBar | Kind::InlineUnknownBar) {
                     // Dashed outline: quota not reported.
                     for dx in (0..w).step_by(4) {
                         canvas.rect(x + dx, y, 2.min(w - dx), 1);
@@ -971,9 +1126,22 @@ impl Ui {
                     }
                     canvas.rect(x, y, 1, BAR_HEIGHT);
                     canvas.rect(x + w - 1, y, 1, BAR_HEIGHT);
+                } else if row.alert {
+                    // Low quota: doubled outline, solid remainder and a hatched used part.
+                    canvas.round_frame(x, y, w, BAR_HEIGHT);
+                    canvas.frame(x + 1, y + 1, w - 2, BAR_HEIGHT - 2);
+                    let fill = (w - 4) * row.progress as i16 / 100;
+                    canvas.rect(x + 2, y + 2, fill, BAR_HEIGHT - 4);
+                    for py in y + 2..y + BAR_HEIGHT - 2 {
+                        for px in x + 3 + fill..x + w - 2 {
+                            if (px + py) % 3 == 0 {
+                                canvas.pixel(px, py);
+                            }
+                        }
+                    }
                 } else {
-                    // Outline, a 1px white gap, then the remaining-quota fill.
-                    canvas.frame(x, y, w, BAR_HEIGHT);
+                    // Rounded outline, a 1px white gap, then the remaining-quota fill.
+                    canvas.round_frame(x, y, w, BAR_HEIGHT);
                     canvas.rect(x + 2, y + 2, (w - 4) * row.progress as i16 / 100, BAR_HEIGHT - 4);
                 }
             }
@@ -983,18 +1151,26 @@ impl Ui {
                 let text_width = measure_weight(value, row.size, bold);
                 let x = match row.kind {
                     Kind::Provider => {
-                        canvas.icon(row.icon, row.x, row.y - 1);
+                        canvas.icon(row.icon, row.x + 2, row.y - 1);
                         row.x + ICON_SPACE
                     }
                     Kind::Right if row.alert => row.x + row.width - text_width - 4,
-                    Kind::Right => row.x + row.width - text_width - 1,
+                    Kind::Right | Kind::Stamp => row.x + row.width - text_width - 1,
                     _ if row.alert => row.x + 3,
                     _ => row.x,
                 };
                 if row.alert {
-                    canvas.rect(x - 3, row.y, text_width + 6, line_height(row.size) as i16);
+                    canvas.rect(x - 3, row.y + 1, text_width + 6, line_height(row.size) as i16 - 2);
                 }
                 canvas.text_ink(value, x, row.y - 1, row.size, bold, !row.alert);
+                if row.kind == Kind::Provider {
+                    // Provider label: icon and name in white on a rounded black tag.
+                    let (w, h) = (ICON_SPACE + text_width + CHIP_PAD, 17);
+                    canvas.invert(row.x, row.y - 1, w, h);
+                    for (cx, cy) in [(row.x, row.y - 1), (row.x + w - 1, row.y - 1), (row.x, row.y + h - 2), (row.x + w - 1, row.y + h - 2)] {
+                        canvas.erase(cx, cy, 1, 1);
+                    }
+                }
             }
         }
     }

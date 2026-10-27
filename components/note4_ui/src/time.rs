@@ -132,6 +132,13 @@ fn clock(out: &mut Text, at: &Local) {
 }
 
 /// Reset/expiry time relative to today: "Today 14:05", "Fri 09:00", "Oct 30 08:00".
+/// `hh:mm` of `epoch` in the display zone.
+pub fn hhmm(epoch: i64, zone: &str) -> Option<Text> {
+    let at = local(epoch, zone)?;
+    let mut out = Text::new();
+    clock(&mut out, &at);
+    Some(out)
+}
 pub fn absolute(lang: Lang, value: &str, now: i64, zone: &str) -> Text {
     let mut out = Text::new();
     let Some(epoch) = instant(value) else {

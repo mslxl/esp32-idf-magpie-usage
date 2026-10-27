@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { defaultPrefs, encodeDisplayPrefs, decodeDisplayPrefs, uploadDisplayPrefs } from "./display-prefs";
+import { HIDE_EMPTY, defaultPrefs, encodeDisplayPrefs, decodeDisplayPrefs, uploadDisplayPrefs } from "./display-prefs";
 import { Opcode } from "./protocol";
 import { crc32 } from "./account-directory";
 import { casefold } from "./casefold";
@@ -27,4 +27,11 @@ it("transfers a preference document larger than one transaction without treating
   expect(combined).toEqual(bytes);
   expect(calls.at(-1)!.opcode).toBe(Opcode.FinishDisplayPrefs);
   expect(calls.some(call => call.opcode === Opcode.Commit)).toBe(false);
+});
+it("stores the hide-empty switch beside the kind bits", () => {
+  const prefs = { ...defaultPrefs(), kinds: 5, hideEmpty: true };
+  const bytes = encodeDisplayPrefs(prefs);
+  expect(bytes[3]).toBe(5 | HIDE_EMPTY); expect(decodeDisplayPrefs(bytes)).toEqual(prefs);
+  expect(decodeDisplayPrefs(encodeDisplayPrefs(defaultPrefs())).hideEmpty).toBe(false);
+  bytes[3] = 32; expect(() => decodeDisplayPrefs(bytes)).toThrow();
 });
