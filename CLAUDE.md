@@ -1,17 +1,17 @@
-# 仓库约定
+# Repository Conventions
 
-## 署名
+## Attribution
 
-在本仓库中提交代码或创建 PR 时不要署名 Claude Code：
+Do not include Claude Code attribution when committing code or creating PRs in this repository:
 
-- 不要添加 `Co-Authored-By: Claude Code`
-- 不要添加 `Generated with Claude Code` 或其他 Claude Code 署名/推广行
+- Do not add `Co-Authored-By: Claude Code`.
+- Do not add `Generated with Claude Code` or any other Claude Code attribution or promotional lines.
 
-提交信息正常描述改动即可。
+Commit messages should simply describe the changes.
 
 ## Agent skills
 
-项目级 skills 位于 `.claude/skills/`，来源与说明见 `.claude/skills/README.md`。
+Project-level skills are located in `.claude/skills/`. See `.claude/skills/README.md` for their sources and documentation.
 
 ### Issue tracker
 
@@ -25,9 +25,9 @@ Five default roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-
 
 Single-context: root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain.md`.
 
-## NOTE4 原生 Rust UI 编译与烧录
+## Building and Flashing the NOTE4 Native Rust UI
 
-所有 `just` 命令从仓库根目录执行。使用 ESP-IDF 6.1，按本地安装设置 `IDF_EXPORT`，指向 SDK 的 `export.ps1`。构建脚本使用 PowerShell；依赖 Python、uv、just 及 Espressif Rust `esp` toolchain（目标 `xtensa-esp32s3-none-elf`）。
+Run all `just` commands from the repository root. Use ESP-IDF 6.1 and set `IDF_EXPORT` to the SDK's `export.ps1` according to your local installation. The build scripts use PowerShell and require Python, uv, just, and the Espressif Rust `esp` toolchain (target: `xtensa-esp32s3-none-elf`).
 
 ```text
 just build
@@ -35,9 +35,9 @@ just test
 just test-ui
 ```
 
-`just prepare` 生成 Rust 字体、图标、时区和 NOTE4 波形；`just build` 先准备再构建 ESP32-S3 固件。默认输出仓库内 `.note4-build/idf`，可用 `NOTE4_BUILD_DIR` 指定构建目录。构建失败先 `just clean` 再 `just build`，不要直接用 `idf.py build` 跳过准备。
+`just prepare` generates Rust fonts, icons, time zones, and NOTE4 waveforms; `just build` runs preparation before building the ESP32-S3 firmware. Build output defaults to `.note4-build/idf` within the repository; use `NOTE4_BUILD_DIR` to specify a different build directory. If a build fails, run `just clean` followed by `just build`. Do not bypass preparation by running `idf.py build` directly.
 
-烧录前确认设备是黑白 NOTE4 v1.0，并设置 `NOTE4_PORT` 为实际串口、`NOTE4_BACKUP` 为该设备完整的 16 MiB 原始 Flash 备份；可用 `NOTE4_BACKUP_SHA256` 指定校验值。不要依赖仓库默认的串口和备份文件名判断当前设备。备份不能删除或覆盖。
+Before flashing, confirm that the device is a monochrome NOTE4 v1.0. Set `NOTE4_PORT` to its actual serial port and `NOTE4_BACKUP` to a complete 16 MiB raw flash backup of that device; use `NOTE4_BACKUP_SHA256` to specify a checksum if needed. Do not identify the current device based on the repository's default serial port or backup filename. Never delete or overwrite the backup.
 
 ```text
 just verify-backup
@@ -45,20 +45,20 @@ just device-info
 just flash
 ```
 
-`just flash` 依次执行构建、备份校验、设备信息检查及烧录；`just flash-dev` 使用相同的校验流程。设备信息检查不能代替确认面板型号。
+`just flash` builds the firmware, verifies the backup, checks device information, and flashes the device, in that order; `just flash-dev` uses the same verification process. The device information check does not replace confirming the panel model.
 
-## 开发截图与 release
+## Development Screenshots and Release Builds
 
-开发时使用以下命令，沿用实际设备的 `NOTE4_PORT` 和备份配置：
+During development, use the following commands with the actual device's `NOTE4_PORT` and backup configuration:
 
 ```text
-just build-dev   # 仅编译开发固件
-just flash-dev   # 编译并烧录开发固件
-just screenshot  # 烧录一次后可反复截图
+just build-dev   # Build development firmware only
+just flash-dev   # Build and flash development firmware
+just screenshot  # Capture screenshots repeatedly after flashing once
 ```
 
-使用正式工具导出当前额度页，不要再临时修改源码添加截图接口。截图为设备帧缓冲，不能代替物理屏幕验收。输出位于仓库内忽略目录 `.note4-build/validation/screenshots/`；串口监控、截图、烧录依次执行。交付前用 `just flash` 切回 release。
+Use the provided tooling to export the current quota page. Do not make ad hoc source changes to add screenshot interfaces. Screenshots capture the device framebuffer and do not replace acceptance checks on the physical screen. Output is saved in the ignored directory `.note4-build/validation/screenshots/` within the repository; run serial monitoring, screenshot capture, and flashing sequentially. Switch back to a release build with `just flash` before delivery.
 
-`just build` / `just flash` 默认构建 release，显式关闭 `NOTE4_DEVELOPMENT`，并检查 ELF/BIN 不含截图协议和入口。release 不允许包含相关接口。开发构建默认位于 `${NOTE4_BUILD_DIR}-dev`，可用 `NOTE4_DEV_BUILD_DIR` 指定；失败后先 `just clean-dev` 再重建。详见 `docs/development-screenshots.md`。
+`just build` / `just flash` create release builds by default, explicitly disable `NOTE4_DEVELOPMENT`, and check that the ELF/BIN files contain neither the screenshot protocol nor its entry points. Release builds must not include these interfaces. Development builds default to `${NOTE4_BUILD_DIR}-dev`; use `NOTE4_DEV_BUILD_DIR` to specify a different directory. After a failure, run `just clean-dev` before rebuilding. See `docs/development-screenshots.md` for details.
 
-配网页使用原生 TypeScript DOM；用 `bun run --cwd provisioning-web build` 和 `test` 验证。
+The provisioning page uses native TypeScript DOM APIs. Validate it with `bun run --cwd provisioning-web build` and `bun run --cwd provisioning-web test`.
