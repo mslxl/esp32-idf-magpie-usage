@@ -166,9 +166,7 @@ static void worker(void *context) {
                     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(600000U) - waited);
                 }
                 if (atomic_load(&s_publication) == 1) {
-                    note4_quota_order_clear(&poll.order); poll.order = poll.pending_order;
-                    memset(&poll.pending_order, 0, sizeof(poll.pending_order));
-                    poll.result = NOTE4_MAGPIE_OK; poll.failed = false; poll.failures = 0U; poll.has_snapshot = true;
+                    note4_magpie_poll_accept(&poll, now_ms());
                 } else if (note4_magpie_worker_current(epoch)) {
                     note4_magpie_response_t response = {0};
                     note4_magpie_poll_fail(&poll, NOTE4_MAGPIE_RESOURCE_EXHAUSTED, &response, now_ms(), (int64_t)time(NULL), esp_random());

@@ -67,6 +67,8 @@ note4_quota_result_t note4_quota_order_prepare(const note4_quota_order_t *order,
     note4_quota_snapshot_retain(snapshot);
     note4_quota_order_clear(candidate);
     candidate->baseline = snapshot; candidate->indices = indices;
+    candidate->changed = !order->baseline || count != previous_count;
+    for (size_t i = 0; i < count; ++i) if (changed[i]) candidate->changed = true;
     free(matched); free(changed); return NOTE4_QUOTA_OK;
 failure:
     free(indices); free(matched); free(changed); return result;

@@ -5,6 +5,7 @@
 typedef struct {
     note4_quota_snapshot_t *baseline;
     size_t *indices;
+    bool changed;
 } note4_quota_order_t;
 
 /* Builds a candidate without advancing the committed baseline. Initialize candidate to zero. */

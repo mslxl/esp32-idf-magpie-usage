@@ -38,9 +38,26 @@ static void step(note4_magpie_poll_t *poll, note4_magpie_io_t *io, peer_t *peer,
     note4_magpie_poll_step(poll, io, 1792886400, 0U, &snapshot);
     note4_quota_snapshot_release(snapshot);
 }
-static void replay_order(note4_magpie_poll_t *poll, note4_magpie_io_t *io, peer_t *peer, const char *json, const char *expected, bool emit) {
+static void json_step(note4_magpie_poll_t *poll, note4_magpie_io_t *io, peer_t *peer,
+    const char *json, bool is_reading) {
     char response[4096];
-    const int length = snprintf(response, sizeof(response), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s", strlen(json), json);
+    const char *header = is_reading
+        ? "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Magpie-Reading: 1\r\nContent-Length: %zu\r\n\r\n%s"
+        : "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s";
+    const int length = snprintf(response, sizeof(response), header, strlen(json), json);
+    CHECK(length > 0 && (size_t)length < sizeof(response));
+    peer->response = response; peer->now = poll->next_due;
+    note4_quota_snapshot_t *snapshot = NULL;
+    CHECK(note4_magpie_poll_step(poll, io, 1792886400, 0U, &snapshot));
+    CHECK(snapshot != NULL);
+    note4_quota_snapshot_release(snapshot);
+}
+static void replay_order(note4_magpie_poll_t *poll, note4_magpie_io_t *io, peer_t *peer,
+    const char *json, const char *expected, bool emit) {
+    char response[4096];
+    const int length = snprintf(response, sizeof(response),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(json), json);
     CHECK(length > 0 && (size_t)length < sizeof(response));
     peer->response = response; peer->now = poll->next_due;
     note4_quota_snapshot_t *snapshot = NULL;
@@ -55,11 +72,17 @@ static void replay_order(note4_magpie_poll_t *poll, note4_magpie_io_t *io, peer_
     if (emit) puts("]}");
     note4_quota_snapshot_release(snapshot);
 }
+static void clear_poll(note4_magpie_poll_t *poll) {
+    note4_quota_order_clear(&poll->order);
+    note4_quota_order_clear(&poll->pending_order);
+    note4_magpie_poll_init(poll);
+}
 int main(int argc, char **argv) {
     const bool emit = argc == 2 && !strcmp(argv[1], "--order-replay");
     note4_settings_t settings; note4_settings_clear(&settings);
     memcpy(settings.magpie.endpoint, "https://magpie.test", sizeof("https://magpie.test"));
     memcpy(settings.magpie.key, "web-key-0123456789", sizeof("web-key-0123456789"));
+    settings.web.interval_seconds = 30U;
     peer_t peer = {0};
     note4_magpie_io_t io = {&peer, open_peer, write_peer, read_peer, close_peer, now_peer, wait_peer, cancelled};
     note4_magpie_poll_t poll;
@@ -70,19 +93,20 @@ int main(int argc, char **argv) {
     CHECK(peer.requests == 2U && poll.next_due == 30000U && poll.has_snapshot);
     peer.now = 29999U; step(&poll, &io, &peer, ready); CHECK(peer.requests == 2U);
     peer.now = 30000U; peer.duration = 35000U; step(&poll, &io, &peer, ready);
-    CHECK(poll.next_due == 90000U);
-    peer.duration = 0U; peer.now = 90000U; step(&poll, &io, &peer, reading);
-    CHECK(poll.next_due == 91500U);
+    CHECK(poll.next_due == 95000U);
+    peer.duration = 0U; peer.now = 95000U; step(&poll, &io, &peer, reading);
+    CHECK(poll.next_due == 96500U);
     for (unsigned i = 0; i < 20U; ++i) { peer.now = poll.next_due; step(&poll, &io, &peer, reading); }
-    CHECK(poll.followups == 20U && poll.next_due == 150000U && poll.reading);
+    CHECK(poll.followups == 20U && poll.next_due == 155000U && poll.reading);
     peer.now = poll.next_due; step(&poll, &io, &peer, "HTTP/1.1 500 Error\r\n\r\n");
-    CHECK(poll.failed && poll.next_due == 210000U && !note4_magpie_poll_error_page(&poll, 269999U));
-    CHECK(note4_magpie_poll_error_page(&poll, 270000U));
+    CHECK(poll.failed && poll.next_due == 215000U && poll.extra_wait_seconds == 0U &&
+        !note4_magpie_poll_error_page(&poll, 274999U));
+    CHECK(note4_magpie_poll_error_page(&poll, 275000U));
     note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_SETUP, 200000U);
     CHECK(!note4_magpie_poll_error_page(&poll, 999999U));
     note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 300000U);
-    CHECK(!note4_magpie_poll_error_page(&poll, 369999U));
-    CHECK(note4_magpie_poll_error_page(&poll, 370000U));
+    CHECK(!note4_magpie_poll_error_page(&poll, 374999U));
+    CHECK(note4_magpie_poll_error_page(&poll, 375000U));
     peer.now = 300000U; step(&poll, &io, &peer, ready); CHECK(!poll.failed);
     peer.now = poll.next_due; step(&poll, &io, &peer, "HTTP/1.1 401 Unauthorized\r\n\r\n");
     CHECK(poll.relogin_used && !poll.halted);
@@ -130,6 +154,88 @@ int main(int argc, char **argv) {
     CHECK(peer.error_observed_at == peer.readable_at - 5000U);
     CHECK(peer.error_observed_at < peer.now && !poll.failed);
     peer.waiting_poll = NULL;
+
+    clear_poll(&poll);
+    settings.web.interval_seconds = 300U;
+    peer.readable_at = 0U; peer.duration = 0U; peer.waiting_poll = NULL;
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 1000000U);
+    peer.now = 1000000U; peer.duration = 0U; step(&poll, &io, &peer, login);
+    CHECK(!poll.login_pending && !poll.failed);
+    json_step(&poll, &io, &peer,
+        "[{\"provider\":\"A\",\"user\":\"u\",\"windows\":[{\"used\":1}]},{\"provider\":\"B\",\"user\":\"u\",\"windows\":[{\"used\":2}]}]", false);
+    CHECK(poll.next_due == 1300000U && poll.extra_wait_seconds == 0U);
+    const char *equivalent =
+        "[{\"provider\":\"B\",\"user\":\"u\",\"name\":\"renamed\",\"readAt\":\"2026-01-01T00:00:00Z\",\"windows\":[{\"used\":2.0,\"resetSecs\":9}]},"
+        "{\"provider\":\"A\",\"user\":\"u\",\"alias\":\"renamed\",\"windows\":[{\"used\":1.0,\"balanceTrend\":\"up\"}]}]";
+    json_step(&poll, &io, &peer, equivalent, false);
+    json_step(&poll, &io, &peer, equivalent, false);
+    json_step(&poll, &io, &peer, equivalent, false);
+    CHECK(poll.extra_wait_seconds == 60U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer,
+        "[{\"provider\":\"A\",\"user\":\"u\",\"windows\":[{\"used\":1}]},{\"provider\":\"B\",\"user\":\"u\",\"windows\":[{\"used\":3}]}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer,
+        "[{\"provider\":\"A\",\"user\":\"u\"},{\"provider\":\"B\",\"user\":\"v\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer,
+        "[{\"provider\":\"A\",\"user\":\"u\"},{\"provider\":\"B\",\"user\":\"v\"},{\"provider\":\"C\",\"user\":\"u\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"B\",\"user\":\"v\"},{\"provider\":\"C\",\"user\":\"u\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.extra_wait_seconds == 60U);
+    const uint64_t failure_now = poll.next_due;
+    note4_magpie_poll_fail(&poll, NOTE4_MAGPIE_NETWORK, &no_headers, failure_now, 1792886400, 0U);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, failure_now + 300000U);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.extra_wait_seconds == 60U);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", true);
+    CHECK(poll.extra_wait_seconds == 0U && poll.cycle_changed);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U && !poll.cycle_changed);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    CHECK(poll.unchanged == 2U);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", true);
+    CHECK(poll.unchanged == 2U);
+
+    settings.web.interval_seconds = 600U;
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 2500000U);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+
+    clear_poll(&poll);
+    poll.defer_publication = true;
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 3000000U);
+    peer.now = 3000000U; step(&poll, &io, &peer, login);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    CHECK(poll.order.baseline == NULL && poll.pending_order.baseline != NULL);
+    note4_magpie_poll_accept(&poll, peer.now);
+    CHECK(poll.order.baseline != NULL && !poll.failed);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"B\",\"user\":\"u\"}]", false);
+    CHECK(poll.pending_order.baseline != NULL &&
+        !strcmp(note4_quota_text(poll.order.baseline, 0U, "provider"), "A"));
+    note4_magpie_poll_fail(&poll, NOTE4_MAGPIE_NETWORK, &no_headers, peer.now, 1792886400, 0U);
+    CHECK(!strcmp(note4_quota_text(poll.order.baseline, 0U, "provider"), "A"));
+    json_step(&poll, &io, &peer, "[{\"provider\":\"B\",\"user\":\"u\"}]", false);
+    note4_magpie_poll_accept(&poll, peer.now);
+    CHECK(!strcmp(note4_quota_text(poll.order.baseline, 0U, "provider"), "B") && !poll.failed);
+
+    clear_poll(&poll);
+    settings.web.interval_seconds = 3600U;
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 4000000U);
+    peer.now = 4000000U; step(&poll, &io, &peer, login);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.next_due == 4000000U + 1800000U);
     note4_quota_order_clear(&poll.order);
     if (!emit) puts("magpie poll behavior passed");
     return 0;
