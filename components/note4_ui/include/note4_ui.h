@@ -40,7 +40,7 @@ typedef struct {
 
 typedef struct {
     uint32_t state, slot, round, storage_error, pairing, passkey;
-    uint32_t phase, result, error_page, reading, retry_seconds;
+    uint32_t phase, result, reading, retry_seconds;
     uint32_t layout, adaptive;
     int64_t now;
     const char *timezone;

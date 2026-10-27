@@ -10,7 +10,8 @@ typedef struct {
     bool defer_publication;
     note4_poll_mode_t mode;
     note4_magpie_result_t result;
-    uint64_t next_due, retry_after, failed_at, paused_at;
+<<<<<<< HEAD
+    uint64_t next_due, retry_after;
     uint32_t failures, unchanged, extra_wait_seconds;
     unsigned followups;
     bool cycle_changed;
@@ -26,5 +27,4 @@ bool note4_magpie_poll_step(note4_magpie_poll_t *poll, const note4_magpie_io_t *
 void note4_magpie_poll_accept(note4_magpie_poll_t *poll, uint64_t now);
 void note4_magpie_poll_fail(note4_magpie_poll_t *poll, note4_magpie_result_t result,
     const note4_magpie_response_t *response, uint64_t now, int64_t wall_time, unsigned jitter);
-bool note4_magpie_poll_error_page(const note4_magpie_poll_t *poll, uint64_t now);
 #endif

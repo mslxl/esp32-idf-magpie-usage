@@ -49,7 +49,6 @@ typedef struct {
     uint32_t passkey;
     uint8_t magpie_phase;
     uint8_t magpie_result;
-    bool magpie_error_page;
     bool magpie_reading;
     uint32_t magpie_retry_seconds;
     char display_timezone[64];

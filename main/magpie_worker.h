@@ -19,7 +19,6 @@ typedef struct {
     note4_magpie_result_t result;
     /* Borrowed during the callback; a queued consumer must retain its reference. */
     note4_quota_snapshot_t *snapshot;
-    bool error_page;
     bool reading;
     uint32_t retry_seconds;
 } note4_magpie_event_t;

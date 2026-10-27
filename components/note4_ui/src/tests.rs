@@ -61,7 +61,7 @@ fn source_with(fixture: &Fixture, smart_order: u32, rank: extern "C" fn(*const c
 fn source(fixture: &Fixture) -> Source { source_with(fixture, 0, rank) }
 fn status(layout: u32) -> Status {
     Status { state: 5, slot: 0, round: 0, storage_error: 0, pairing: 0, passkey: 0,
-        phase: 4, result: 0, error_page: 0, reading: 0, retry_seconds: 0, layout, adaptive: 1,
+        phase: 4, result: 0, reading: 0, retry_seconds: 0, layout, adaptive: 1,
         now: 1793016000, timezone: c"Asia/Shanghai".as_ptr(), ble_name: c"magpie-usage-test".as_ptr(),
         battery_percent: 75, battery_flags: 1, language: 0, wifi_retry_seconds: 0 }
 }
@@ -408,6 +408,43 @@ fn storage_and_wifi_retry_status_pages_in_both_languages() {
     assert_ne!(draw(&ui, &wifi, 0)[..64 * 400], banner[..64 * 400], "banner shows the minutes left");
     artifact("wifi-retry-banner", &banner);
 }
+
+#[test]
+fn transient_failures_keep_cached_quotas_while_permanent_errors_replace_them() {
+    let model = one_window("42", "asOf", "2026-10-25T06:30:00Z");
+    let mut state = status(0);
+    state.now = at("2026-10-25T06:30:00Z");
+    state.phase = phase::FAILED;
+    state.result = result::TIMEOUT;
+    state.retry_seconds = 45;
+    assert!(state.quotas(), "a transient failure keeps cached quota pages");
+    let ui = build(&model, &state);
+    let quota_page = draw(&ui, &state, 0);
+    assert_ne!(quota_page, draw_status(&ui, &state), "cached quotas are not replaced by the status page");
+    assert!(texts(&ui).iter().any(|t| t == "58%"), "cached quota stays visible");
+    artifact("transient-failure-cached", &quota_page);
+
+    // Without a snapshot the same failure still shows the reading status page.
+    let empty = build(&fixture(0, 0), &state);
+    assert!(state.quotas());
+    assert_ne!(draw_status(&empty, &state), quota_page);
+    assert_eq!(status::content(&state).0, "QUOTA READING FAILED");
+
+    // Permanent failures replace cached quotas with their own status page.
+    for (code, title) in [
+        (result::CONFIG_REQUIRED, "MAGPIE SETUP REQUIRED"),
+        (result::AUTH_REQUIRED, "MAGPIE LOGIN EXPIRED"),
+        (result::FORBIDDEN, "ACCESS DENIED"),
+        (result::CERTIFICATE, "CERTIFICATE ERROR"),
+    ] {
+        let mut permanent = status(0);
+        permanent.phase = phase::FAILED;
+        permanent.result = code;
+        assert!(!permanent.quotas(), "result {code} blocks quota pages");
+        assert_eq!(status::content(&permanent).0, title);
+    }
+}
+
 fn draw_status(ui: &Ui, state: &Status) -> Vec<u16> {
     let mut frame = vec![0; FRAME_BYTES];
     assert_eq!(unsafe { note4_ui_draw(ui, state, 0, 0, frame.as_mut_ptr(), frame.len()) }, 0);

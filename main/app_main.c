@@ -674,7 +674,6 @@ static void process_event(controller_t *controller, const coord_event_t *event) 
         if (!configuring(controller) && event->data.magpie.epoch == controller->magpie_epoch) {
             controller->state.magpie_phase = event->data.magpie.phase;
             controller->state.magpie_result = event->data.magpie.result;
-            controller->state.magpie_error_page = event->data.magpie.error_page;
             controller->state.magpie_reading = event->data.magpie.reading;
             controller->state.magpie_retry_seconds = event->data.magpie.retry_seconds;
             if (event->data.magpie.snapshot != NULL) {

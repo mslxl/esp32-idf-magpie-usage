@@ -322,7 +322,6 @@ pub struct Status {
     passkey: u32,
     phase: u32,
     result: u32,
-    error_page: u32,
     reading: u32,
     retry_seconds: u32,
     layout: u32,
@@ -347,10 +346,12 @@ impl Status {
         self.state != state::CONNECTED || self.phase == phase::FAILED
     }
     /// Whether quota pages (rather than a full-screen status page) are shown.
+    /// Transient failures keep cached quotas on screen; only failures the user
+    /// must resolve, setup and storage problems replace them with a status page.
     fn quotas(&self) -> bool {
         let setup = matches!(self.state, state::CONFIGURING | state::DISCARD_DIALOG | state::APPLYING);
         let blocking_failure = self.phase == phase::FAILED
-            && ((result::CONFIG_REQUIRED..=result::CERTIFICATE).contains(&self.result) || self.error_page != 0);
+            && (result::CONFIG_REQUIRED..=result::CERTIFICATE).contains(&self.result);
         self.storage_error == storage::OK && self.pairing == 0 && !setup && !blocking_failure
     }
 }

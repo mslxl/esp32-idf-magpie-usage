@@ -44,11 +44,7 @@ void note4_magpie_poll_configure(note4_magpie_poll_t *poll, const note4_settings
         note4_quota_order_clear(&poll->pending_order);
         note4_magpie_poll_init(poll);
         poll->defer_publication = deferred;
-        poll->paused_at = now;
-    } else if (poll->mode == NOTE4_POLL_SETUP && mode != NOTE4_POLL_SETUP && poll->failed) {
-        poll->failed_at = add(poll->failed_at, now - poll->paused_at);
     }
-    if (mode == NOTE4_POLL_SETUP && poll->mode != NOTE4_POLL_SETUP) poll->paused_at = now;
     const bool credentials_changed = strcmp(poll->settings.magpie.key, settings->magpie.key) != 0 ||
         poll->settings.web.allow_plain_http != settings->web.allow_plain_http;
     if (instance_changed || credentials_changed || (saved && poll->halted)) {
@@ -61,7 +57,7 @@ void note4_magpie_poll_configure(note4_magpie_poll_t *poll, const note4_settings
     poll->settings = *settings;
     poll->mode = mode; poll->following = false; poll->followups = 0U;
     if (mode == NOTE4_POLL_OFFLINE && !poll->halted) {
-        if (!poll->failed) { poll->failed = true; poll->failed_at = now; }
+        poll->failed = true;
         poll->result = NOTE4_MAGPIE_NETWORK;
     }
     if (mode == NOTE4_POLL_ONLINE) {
@@ -95,7 +91,7 @@ static uint64_t retry_deadline(const note4_magpie_response_t *response, uint64_t
 
 void note4_magpie_poll_fail(note4_magpie_poll_t *poll, note4_magpie_result_t result,
     const note4_magpie_response_t *response, uint64_t now, int64_t wall_time, unsigned jitter) {
-    if (!poll->failed) { poll->failed = true; poll->failed_at = now; }
+    poll->failed = true;
     poll->result = result; poll->following = false; poll->reading = false;
     reset_wait(poll);
     if (result == NOTE4_MAGPIE_AUTH_REQUIRED || result == NOTE4_MAGPIE_FORBIDDEN ||
@@ -156,8 +152,4 @@ bool note4_magpie_poll_step(note4_magpie_poll_t *poll, const note4_magpie_io_t *
     poll->following = response.reading && poll->followups < 20U;
     if (!poll->defer_publication) note4_magpie_poll_accept(poll, completed);
     return true;
-}
-
-bool note4_magpie_poll_error_page(const note4_magpie_poll_t *poll, uint64_t now) {
-    return poll->failed && poll->mode != NOTE4_POLL_SETUP && now >= poll->failed_at && now - poll->failed_at >= 120000U;
 }

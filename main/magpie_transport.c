@@ -183,8 +183,8 @@ static void transport_release(void *context, bool reusable) {
     if (!reusable || !transport->connected || transport->failed) transport_close(transport);
 }
 static uint64_t transport_now(void *context) { (void)context; return (uint64_t)(esp_timer_get_time() / 1000); }
-/* Block in select() until the socket can make progress, bounded so cancellation,
- * client deadlines and the error-page timer are still observed. */
+/* Block in select() until the socket can make progress, bounded so cancellation
+ * and client deadlines are still observed. */
 #define NOTE4_TRANSPORT_WAIT_MS 200
 static void transport_wait(void *context) {
     note4_magpie_transport_t *transport = context;

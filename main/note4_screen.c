@@ -124,7 +124,7 @@ static note4_ui_status_t ui_status(const note4_provisioning_snapshot_t *snapshot
         .state = snapshot->state, .slot = snapshot->slot, .round = snapshot->round,
         .storage_error = snapshot->storage_error, .pairing = snapshot->pairing,
         .passkey = snapshot->passkey, .phase = snapshot->magpie_phase,
-        .result = snapshot->magpie_result, .error_page = snapshot->magpie_error_page,
+        .result = snapshot->magpie_result,
         .reading = snapshot->magpie_reading, .retry_seconds = snapshot->magpie_retry_seconds,
         .layout = snapshot->display_layout, .adaptive = snapshot->adaptive_font,
         .now = (int64_t)time(NULL), .timezone = snapshot->display_timezone[0] ? snapshot->display_timezone : "UTC",
@@ -326,7 +326,7 @@ static void screen_task(void *arg) {
 #ifdef NOTE4_DEV_CAPTURE
         note4_capture_poll(note4_presenter_shown(s_presenter), page, note4_ui_pages(s_ui),
             accepted && s_quotas != NULL && status.state == NOTE4_PROVISIONING_CONNECTED &&
-            !status.pairing && !status.storage_error && !status.error_page && status.phase != NOTE4_MAGPIE_FAILED);
+            !status.pairing && !status.storage_error && status.phase != NOTE4_MAGPIE_FAILED);
 #endif
         /* Pending work (a vetoed publication, a failed render or queued
          * buttons) loops again at once; otherwise sleep until woken. */
