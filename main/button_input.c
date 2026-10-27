@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "esp_sleep.h"
 
 #define NOTE4_BUTTON_UP_GPIO GPIO_NUM_39
 #define NOTE4_BUTTON_OK_GPIO GPIO_NUM_0
@@ -14,10 +15,22 @@
 
 static note4_button_event_handler_t s_handler;
 static void *s_context;
+static TaskHandle_t s_task;
+static const gpio_num_t s_pins[] = {NOTE4_BUTTON_UP_GPIO, NOTE4_BUTTON_OK_GPIO, NOTE4_BUTTON_DOWN_GPIO};
+
+/* A low level on any button wakes light sleep and this task. The interrupt stays
+ * masked while the task debounces at 10 ms, and is re-armed once all are idle. */
+static void button_isr(void *arg) {
+    (void)arg;
+    BaseType_t woken = pdFALSE;
+    for (size_t index = 0U; index < 3U; ++index) gpio_intr_disable(s_pins[index]);
+    vTaskNotifyGiveFromISR(s_task, &woken);
+    portYIELD_FROM_ISR(woken);
+}
 
 static void button_task(void *arg) {
     (void)arg;
-    const gpio_num_t pins[] = {NOTE4_BUTTON_UP_GPIO, NOTE4_BUTTON_OK_GPIO, NOTE4_BUTTON_DOWN_GPIO};
+    const gpio_num_t *pins = s_pins;
     bool raw[3] = {0};
     bool pressed[3] = {0};
     bool long_sent[3] = {0};
@@ -52,7 +65,18 @@ static void button_task(void *arg) {
                 s_handler(&event, s_context);
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        bool busy = false;
+        for (size_t index = 0U; index < 3U; ++index) {
+            busy |= raw[index] || pressed[index] ||
+                now - changed[index] < pdMS_TO_TICKS(NOTE4_BUTTON_DEBOUNCE_MS);
+        }
+        if (busy) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else {
+            (void)ulTaskNotifyTake(pdTRUE, 0);
+            for (size_t index = 0U; index < 3U; ++index) gpio_intr_enable(pins[index]);
+            (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        }
     }
 }
 
@@ -71,6 +95,17 @@ esp_err_t note4_button_input_init(note4_button_event_handler_t handler, void *co
     };
     esp_err_t err = gpio_config(&config);
     if (err != ESP_OK) return err;
-    return xTaskCreate(button_task, "note4_buttons", 3072, NULL, 5, NULL) == pdPASS
+    err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+    for (size_t index = 0U; index < 3U; ++index) {
+        gpio_intr_disable(s_pins[index]);
+        err = gpio_wakeup_enable(s_pins[index], GPIO_INTR_LOW_LEVEL);
+        if (err == ESP_OK) err = gpio_isr_handler_add(s_pins[index], button_isr, NULL);
+        if (err != ESP_OK) return err;
+    }
+    err = esp_sleep_enable_gpio_wakeup();
+    if (err != ESP_OK) return err;
+    /* Interrupts stay masked until the task's first idle pass re-arms them. */
+    return xTaskCreate(button_task, "note4_buttons", 3072, NULL, 5, &s_task) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }

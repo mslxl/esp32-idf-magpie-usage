@@ -113,16 +113,32 @@ static bool alive(stream_t *stream) {
     return stream->error == NOTE4_MAGPIE_OK;
 }
 
-static int byte(stream_t *stream) {
+/* Refills the buffer; alive() runs once per refill attempt, not per byte. */
+static bool refill(stream_t *stream) {
     while (alive(stream)) {
-        if (stream->offset < stream->length) return stream->buffer[stream->offset++];
         const int n = stream->io->read(stream->io->context, stream->buffer, sizeof(stream->buffer));
         if (n == -2) { stream->io->wait(stream->io->context); continue; }
-        if (n <= 0) { stream->error = n == -4 ? NOTE4_MAGPIE_RESOURCE_EXHAUSTED : NOTE4_MAGPIE_NETWORK; return -1; }
+        if (n <= 0) { stream->error = n == -4 ? NOTE4_MAGPIE_RESOURCE_EXHAUSTED : NOTE4_MAGPIE_NETWORK; return false; }
         stream->offset = 0U; stream->length = (size_t)n;
         stream->progress = stream->io->now_ms(stream->io->context);
+        return true;
     }
-    return -1;
+    return false;
+}
+
+static int byte(stream_t *stream) {
+    if (stream->offset == stream->length && !refill(stream)) return -1;
+    return stream->buffer[stream->offset++];
+}
+
+/* Copies up to length buffered bytes, refilling as needed; returns bytes copied. */
+static size_t block(stream_t *stream, char *output, size_t length) {
+    if (stream->offset == stream->length && !refill(stream)) return 0U;
+    size_t n = stream->length - stream->offset;
+    if (n > length) n = length;
+    if (output != NULL) memcpy(output, stream->buffer + stream->offset, n);
+    stream->offset += n;
+    return n;
 }
 
 static bool line(stream_t *stream, char *output, size_t capacity, bool header) {
@@ -238,10 +254,10 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
         size_t n = 4U + form_encode(settings->magpie.key, body + 4U);
         memcpy(body + n, "&back=", 6U); n += 6U;
         (void)form_encode(back, body + n);
-        (void)snprintf(request, 4096U, "POST %s/_magpie/sign-in HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %u\r\n\r\n%s",
+        (void)snprintf(request, 4096U, "POST %s/_magpie/sign-in HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %u\r\n\r\n%s",
             url.path, url.authority, (unsigned)strlen(body), body);
     } else {
-        (void)snprintf(request, 4096U, "GET %s/api/usage/quotas HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nCookie: %s=%s\r\n\r\n",
+        (void)snprintf(request, 4096U, "GET %s/api/usage/quotas HTTP/1.1\r\nHost: %s\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nCookie: %s=%s\r\n\r\n",
             url.path, url.authority, session->cookie_name, session->cookie_value);
     }
     while (alive(&stream)) {
@@ -270,13 +286,16 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
     bool json = false, content_type_seen = false, length_seen = false, chunked = false, encoding_seen = false, reading_seen = false;
     uint64_t content_length = 0U;
     bool retry_seen = false, retry_invalid = false, date_seen = false, date_invalid = false;
+    bool server_closes = code == 0U || strncmp(header, "HTTP/1.1 ", 9U) != 0;
     while (alive(&stream) && line(&stream, header, sizeof(header), true) && header[0]) {
         char *colon = strchr(header, ':');
         if (colon == NULL || colon == header) { stream.error = NOTE4_MAGPIE_INVALID_RESPONSE; break; }
         *colon++ = 0;
         for (const char *p = header; *p; ++p) if (!isalnum((unsigned char)*p) && *p != '-') stream.error = NOTE4_MAGPIE_INVALID_RESPONSE;
         char *value = trim(colon);
-        if (equal_ci(header, "Set-Cookie") && login) {
+        if (equal_ci(header, "Connection")) {
+            if (equal_ci(value, "close")) server_closes = true;
+        } else if (equal_ci(header, "Set-Cookie") && login) {
             if (!cookie(value, &url, settings->magpie.key, wall_time, &candidate, &seen_cookie)) stream.error = NOTE4_MAGPIE_INVALID_RESPONSE;
         } else if (equal_ci(header, "Content-Type")) {
             if (content_type_seen) { stream.error = NOTE4_MAGPIE_INVALID_RESPONSE; break; }
@@ -358,10 +377,12 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
                     if (next == NULL) { stream.error = NOTE4_MAGPIE_RESOURCE_EXHAUSTED; break; }
                     response->body = next; capacity = next_capacity;
                 }
-                const int c = byte(&stream);
-                if (c < 0) break;
-                response->body[response->length++] = (char)c;
-                --remaining;
+                size_t want = capacity - 1U - response->length;
+                if (want > remaining) want = (size_t)remaining;
+                const size_t n = block(&stream, response->body + response->length, want);
+                if (n == 0U) break;
+                response->length += n;
+                remaining -= n;
             }
             if (chunked && alive(&stream) && (byte(&stream) != '\r' || byte(&stream) != '\n')) stream.error = NOTE4_MAGPIE_INVALID_RESPONSE;
             if (!chunked) complete = true;
@@ -373,7 +394,17 @@ static note4_magpie_result_t exchange(const note4_settings_t *settings, const no
             } else response->body[response->length] = 0;
         }
     }
-    io->close(io->context);
+    if (login && alive(&stream) && !chunked && length_seen && content_length <= 4096U) {
+        /* Drain a small sign-in body so the connection can carry the next request. */
+        for (uint64_t left = content_length; left && alive(&stream);) {
+            const size_t n = block(&stream, NULL, left > SIZE_MAX ? SIZE_MAX : (size_t)left);
+            if (n == 0U) break;
+            left -= n;
+        }
+    } else if (login) server_closes = true;
+    const bool reusable = alive(&stream) && !server_closes && stream.offset == stream.length;
+    if (io->release != NULL) io->release(io->context, reusable);
+    else io->close(io->context);
     memset(&candidate, 0, sizeof(candidate));
     if (stream.error != NOTE4_MAGPIE_OK && response != NULL) {
         free(response->body); response->body = NULL; response->length = 0U;

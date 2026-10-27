@@ -7,7 +7,8 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 
 #define NOTE4_POWER_LED_GPIO GPIO_NUM_3
 #define NOTE4_CHARGE_GPIO GPIO_NUM_2
@@ -21,16 +22,36 @@ static note4_battery_t s_battery;
 static int64_t s_next_sample, s_next_voltage;
 static int s_filtered_mv;
 static atomic_uint s_power_state;
-static esp_timer_handle_t s_power_timer;
+static TimerHandle_t s_power_timer;
 static bool s_led_available;
 
-/* The timer owns GPIO sampling and LED writes, independently of EPD/network work. */
-static void power_tick(void *context) {
+static unsigned power_pins(void) {
+    return (gpio_get_level(NOTE4_CHARGE_GPIO) == 0 ? 1U : 0U)
+        | (gpio_get_level(NOTE4_FULL_GPIO) != 0 ? 2U : 0U);
+}
+
+static void power_interrupts(bool enabled) {
+    if (enabled) { gpio_intr_enable(NOTE4_CHARGE_GPIO); gpio_intr_enable(NOTE4_FULL_GPIO); }
+    else { gpio_intr_disable(NOTE4_CHARGE_GPIO); gpio_intr_disable(NOTE4_FULL_GPIO); }
+}
+
+/* An edge on either status pin masks both interrupts and starts the sampler. */
+static void power_isr(void *context) {
     (void)context;
+    BaseType_t woken = pdFALSE;
+    power_interrupts(false);
+    (void)xTimerStartFromISR(s_power_timer, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+/* The 100 ms timer owns GPIO sampling and LED writes, independently of EPD/network
+ * work. It runs only while a pin change is being debounced or the LED blinks
+ * (charging); otherwise it stops and the pin interrupts are re-armed. */
+static void power_tick(TimerHandle_t timer) {
+    (void)timer;
     static unsigned candidate, stable_samples, blink_ticks;
     static bool led_on;
-    const unsigned pins = (gpio_get_level(NOTE4_CHARGE_GPIO) == 0 ? 1U : 0U)
-        | (gpio_get_level(NOTE4_FULL_GPIO) != 0 ? 2U : 0U);
+    const unsigned pins = power_pins();
     if (pins != candidate) { candidate = pins; stable_samples = 0U; }
     if (stable_samples < 3U) ++stable_samples;
     unsigned state = atomic_load(&s_power_state);
@@ -51,6 +72,12 @@ static void power_tick(void *context) {
         gpio_set_level(NOTE4_POWER_LED_GPIO, on ? 0 : 1);
         led_on = on;
     }
+    if (stable_samples >= 3U && pins == state && state != 1U) {
+        (void)xTimerStop(s_power_timer, 0);
+        power_interrupts(true);
+        /* An edge between the last sample and re-arming would be lost. */
+        if (power_pins() != state) { power_interrupts(false); (void)xTimerStart(s_power_timer, 0); }
+    }
 }
 
 void note4_battery_init(void) {
@@ -60,9 +87,10 @@ void note4_battery_init(void) {
         .pin_bit_mask = (1ULL << NOTE4_CHARGE_GPIO) | (1ULL << NOTE4_FULL_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE,
     };
     s_charge_available = gpio_config(&pins) == ESP_OK;
+    if (s_charge_available) power_interrupts(false);
     gpio_hold_dis(NOTE4_POWER_LED_GPIO);
     gpio_set_level(NOTE4_POWER_LED_GPIO, 1);
     const gpio_config_t led = {
@@ -73,11 +101,16 @@ void note4_battery_init(void) {
     s_led_available = gpio_config(&led) == ESP_OK;
     if (!s_led_available) ESP_LOGW("note4_battery", "power LED unavailable");
     if (s_charge_available) {
-        const esp_timer_create_args_t timer = {
-            .callback = power_tick, .name = "note4_power", .skip_unhandled_events = true,
-        };
-        esp_err_t timer_err = esp_timer_create(&timer, &s_power_timer);
-        if (timer_err == ESP_OK) timer_err = esp_timer_start_periodic(s_power_timer, 100000);
+        s_power_timer = xTimerCreate("note4_power", pdMS_TO_TICKS(100), pdTRUE, NULL, power_tick);
+        esp_err_t timer_err = s_power_timer != NULL ? ESP_OK : ESP_ERR_NO_MEM;
+        if (timer_err == ESP_OK) {
+            timer_err = gpio_install_isr_service(0);
+            if (timer_err == ESP_ERR_INVALID_STATE) timer_err = ESP_OK;
+        }
+        if (timer_err == ESP_OK) timer_err = gpio_isr_handler_add(NOTE4_CHARGE_GPIO, power_isr, NULL);
+        if (timer_err == ESP_OK) timer_err = gpio_isr_handler_add(NOTE4_FULL_GPIO, power_isr, NULL);
+        /* The first samples settle the initial state, then the timer stops itself. */
+        if (timer_err == ESP_OK && xTimerStart(s_power_timer, 0) != pdPASS) timer_err = ESP_FAIL;
         if (timer_err != ESP_OK) ESP_LOGW("note4_battery", "power status timer unavailable: %s", esp_err_to_name(timer_err));
     }
     const adc_oneshot_unit_init_cfg_t unit = {.unit_id = ADC_UNIT_1};
@@ -102,6 +135,12 @@ void note4_battery_init(void) {
 }
 
 note4_battery_t note4_battery_poll(int64_t now_us) {
+    /* Edge interrupts can be missed while the GPIO matrix sleeps; resample on poll. */
+    if (s_power_timer != NULL && xTimerIsTimerActive(s_power_timer) == pdFALSE &&
+        power_pins() != atomic_load(&s_power_state)) {
+        power_interrupts(false);
+        (void)xTimerStart(s_power_timer, 0);
+    }
     const unsigned state = atomic_load(&s_power_state);
     const bool charging = state == 1U, full = state == 2U;
     const bool power_changed = s_battery.charging != charging || s_battery.full != full;

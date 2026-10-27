@@ -6,6 +6,7 @@
 
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_log.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -16,7 +17,8 @@ static note4_wifi_config_t s_config;
 static wifi_scan_config_t s_scan_config;
 static bool s_initialized;
 static size_t s_connecting_slot;
-static bool s_scan_in_progress;
+static atomic_bool s_scan_in_progress;
+static atomic_bool s_running;
 static atomic_bool s_disconnecting;
 static atomic_bool s_attempt_active;
 static atomic_uint s_attempt;
@@ -46,7 +48,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             emit(NOTE4_WIFI_EVENT_DISCONNECTED, (uint8_t)s_connecting_slot, disconnected->reason);
         }
     } else if (id == WIFI_EVENT_SCAN_DONE) {
-        s_scan_in_progress = false;
+        atomic_store(&s_scan_in_progress, false);
         emit(NOTE4_WIFI_EVENT_SCAN_DONE, 0U, 0);
     }
 }
@@ -80,9 +82,37 @@ esp_err_t note4_wifi_manager_init(note4_wifi_event_handler_t handler, void *cont
     if (err != ESP_OK) return err;
     err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err != ESP_OK) return err;
-    err = esp_wifi_start();
-    if (err == ESP_OK || err == ESP_ERR_WIFI_STATE) s_initialized = true;
-    return err == ESP_ERR_WIFI_STATE ? ESP_OK : err;
+    s_initialized = true;
+    return note4_wifi_manager_start();
+}
+
+/* Modem sleep with a DTIM-relative listen interval lets the station sleep between
+ * beacons; light sleep then gates the CPU while the radio is idle. */
+esp_err_t note4_wifi_manager_start(void) {
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    if (atomic_load(&s_running)) return ESP_OK;
+    esp_err_t err = esp_wifi_start();
+    if (err == ESP_ERR_WIFI_STATE) err = ESP_OK;
+    if (err == ESP_OK) {
+        atomic_store(&s_running, true);
+        const esp_err_t ps = esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+        if (ps != ESP_OK) ESP_LOGW("note4_wifi", "power save unavailable: %s", esp_err_to_name(ps));
+    }
+    return err;
+}
+
+/* Turns the radio off, e.g. while waiting for the next automatic retry. */
+esp_err_t note4_wifi_manager_stop(void) {
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    if (!atomic_load(&s_running)) return ESP_OK;
+    esp_err_t err = note4_wifi_manager_disconnect();
+    if (err != ESP_OK) ESP_LOGW("note4_wifi", "disconnect before stop failed: %s", esp_err_to_name(err));
+    err = esp_wifi_stop();
+    if (err == ESP_OK) {
+        atomic_store(&s_running, false);
+        atomic_store(&s_attempt_active, false);
+    }
+    return err;
 }
 
 esp_err_t note4_wifi_manager_set_config(const note4_wifi_config_t *config) {
@@ -95,7 +125,8 @@ esp_err_t note4_wifi_manager_connect(size_t slot) {
     if (!s_initialized || slot >= NOTE4_WIFI_MAX_SLOTS || !s_config.slots[slot].enabled) {
         return ESP_ERR_INVALID_ARG;
     }
-    esp_err_t err = note4_wifi_manager_disconnect();
+    esp_err_t err = note4_wifi_manager_start();
+    if (err == ESP_OK) err = note4_wifi_manager_disconnect();
     if (err != ESP_OK) return err;
     wifi_config_t wifi_config;
     s_connecting_slot = slot;
@@ -105,6 +136,7 @@ esp_err_t note4_wifi_manager_connect(size_t slot) {
     wifi_config.sta.threshold.authmode = s_config.slots[slot].password_len == 0U
         ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
     wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.listen_interval = 3U;
     err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     if (err != ESP_OK) return err;
     atomic_fetch_add(&s_attempt, 1U);
@@ -120,10 +152,7 @@ uint32_t note4_wifi_manager_attempt(void) {
 
 esp_err_t note4_wifi_manager_disconnect(void) {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
-    if (s_scan_in_progress) {
-        (void)esp_wifi_scan_stop();
-        s_scan_in_progress = false;
-    }
+    if (atomic_exchange(&s_scan_in_progress, false)) (void)esp_wifi_scan_stop();
     if (!atomic_load(&s_attempt_active)) return ESP_OK;
     xEventGroupClearBits(s_disconnect_events, 1U);
     atomic_store(&s_disconnecting, true);
@@ -139,11 +168,14 @@ esp_err_t note4_wifi_manager_disconnect(void) {
 }
 
 esp_err_t note4_wifi_manager_scan(void) {
-    if (!s_initialized || s_scan_in_progress) return ESP_ERR_INVALID_STATE;
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = note4_wifi_manager_start();
+    if (err != ESP_OK) return err;
+    if (atomic_exchange(&s_scan_in_progress, true)) return ESP_ERR_INVALID_STATE;
     memset(&s_scan_config, 0, sizeof(s_scan_config));
     s_scan_config.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-    esp_err_t err = esp_wifi_scan_start(&s_scan_config, false);
-    if (err == ESP_OK) s_scan_in_progress = true;
+    err = esp_wifi_scan_start(&s_scan_config, false);
+    if (err != ESP_OK) atomic_store(&s_scan_in_progress, false);
     return err;
 }
 

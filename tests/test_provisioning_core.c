@@ -82,7 +82,28 @@ static void test_sparse_slots_and_disconnect(void) {
     assert(state.state == NOTE4_PROVISIONING_BOOT);
 }
 
+static void test_automatic_retry(void) {
+    assert(note4_provisioning_wifi_retry_delay_seconds(1U) == 60U);
+    assert(note4_provisioning_wifi_retry_delay_seconds(2U) == 300U);
+    assert(note4_provisioning_wifi_retry_delay_seconds(3U) == 900U);
+    assert(note4_provisioning_wifi_retry_delay_seconds(4U) == 1800U);
+    assert(note4_provisioning_wifi_retry_delay_seconds(50U) == 1800U);
+    note4_provisioning_snapshot_t state;
+    note4_provisioning_init(&state);
+    assert(state.wifi_retry_seconds == 0U && state.storage_error == NOTE4_STORAGE_OK);
+    apply(&state, NOTE4_PROVISIONING_EVENT_CONFIG_LOADED, 0x06U);
+    for (unsigned i = 0; i < 6U; ++i) apply(&state, NOTE4_PROVISIONING_EVENT_CONNECT_FAILED, 0x06U);
+    assert(state.state == NOTE4_PROVISIONING_FAILURE);
+    /* The backoff timer restarts a full three-round cycle from the first slot. */
+    apply(&state, NOTE4_PROVISIONING_EVENT_RETRY, 0x06U);
+    assert(state.state == NOTE4_PROVISIONING_CONNECTING && state.round == 1U && state.slot == 1U &&
+           state.attempted_mask == 0U);
+    apply(&state, NOTE4_PROVISIONING_EVENT_RETRY, 0x06U);
+    assert(state.state == NOTE4_PROVISIONING_CONNECTING);
+}
+
 int main(void) {
+    test_automatic_retry();
     test_sparse_slots_and_disconnect();
     test_config_round_trip();
     test_three_rounds();

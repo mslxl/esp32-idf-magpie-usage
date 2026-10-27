@@ -284,5 +284,9 @@ The development host did not report a present Bluetooth adapter. These cases rem
 - Open-network and password-protected AP connection, ordered failover after a real disconnect, and three failed rounds on the device.
 - NVS persistence through a power cycle.
 - Physical UP/OK/DOWN controls, discard dialog and failure retry, and visible panel appearance.
+- Automatic Wi-Fi retry from FAILURE (1, 5, 15 and 30 minute backoff with the radio stopped), immediate retry on OK, and backoff reset on IP, OK, long DOWN and COMMIT.
+- Storage erase recovery: a `note4_cfg` partition reporting no free pages or a newer NVS version shows the needs-erase storage error; long DOWN erases only that partition and boot continues into setup.
+- BLE lifecycle: NimBLE starts on setup entry and stops after leaving setup, with the final ACK delivered first; MTU-sized notifications with a large MTU and eight-byte fragments with MTU 23.
+- Power management: DFS and light sleep in release builds (light sleep disabled in the development screenshot build), GPIO wake for buttons and charge pins, and current draw in idle, setup and failure states.
 
 The device has not been given invented network credentials for these checks. NVS/flash encryption remains disabled in this development build; product key provisioning is not covered by this validation.

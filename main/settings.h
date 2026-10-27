@@ -7,11 +7,16 @@
 #define NOTE4_WEB_SCHEMA 2U
 #define NOTE4_TIMEZONE_MAX 63U
 #define NOTE4_SETTINGS_MAX_BYTES 1536U
+/* Web flags: bit0 allow_plain_http, bit1 adaptive_font, bit2 layout, bit3 language. */
+#define NOTE4_WEB_FLAGS_MAX 15U
+#define NOTE4_LANGUAGE_ENGLISH 0U
+#define NOTE4_LANGUAGE_CHINESE 1U
 
 typedef struct {
     bool allow_plain_http;
     bool adaptive_font;
     uint8_t layout;
+    uint8_t language;
     uint16_t interval_seconds;
     char timezone[NOTE4_TIMEZONE_MAX + 1U];
 } note4_web_settings_t;

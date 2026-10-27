@@ -17,5 +17,16 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 # Keep TLS buffers in PSRAM so Wi-Fi, EPD and bounded quota reads retain internal RAM.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
-CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
+# Reuse TLS sessions between the sign-in and quota requests and later polls.
+CONFIG_MBEDTLS_CLIENT_SSL_SESSION_TICKETS=y
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
+# Dynamic frequency scaling with automatic light sleep while idle. Wi-Fi uses
+# modem sleep (WIFI_PS_MAX_MODEM); BLE runs only during setup and holds a
+# no-light-sleep lock; development builds disable light sleep for USB-Serial-JTAG.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
+# BLE notifications use the negotiated ATT MTU (up to 192-byte frame payloads).
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256

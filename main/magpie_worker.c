@@ -3,6 +3,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <time.h>
+#include "esp_log.h"
 #include "esp_netif_sntp.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -17,12 +18,15 @@ static QueueHandle_t s_commands;
 static atomic_uint s_epoch;
 static atomic_int s_publication;
 static portMUX_TYPE s_publication_lock = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t s_task;
 
 bool note4_magpie_worker_current(unsigned epoch) { return atomic_load(&s_epoch) == epoch; }
 void note4_magpie_worker_published(unsigned epoch, bool accepted) {
     portENTER_CRITICAL(&s_publication_lock);
-    if (note4_magpie_worker_current(epoch)) atomic_store(&s_publication, accepted ? 1 : -1);
+    const bool current = note4_magpie_worker_current(epoch);
+    if (current) atomic_store(&s_publication, accepted ? 1 : -1);
     portEXIT_CRITICAL(&s_publication_lock);
+    if (current && s_task != NULL) xTaskNotifyGive(s_task);
 }
 static note4_magpie_handler_t s_handler;
 static void *s_context;
@@ -44,11 +48,12 @@ static note4_magpie_result_t synchronize(unsigned epoch, wait_state_t *wait_stat
     const esp_err_t initialized = esp_netif_sntp_init(&config);
     if (initialized != ESP_OK && initialized != ESP_ERR_INVALID_STATE) return NOTE4_MAGPIE_NETWORK;
     const int64_t started = esp_timer_get_time();
+    /* Block in SNTP's own wait, in 1 s slices so cancellation is still observed. */
     while (time(NULL) < 1704067200) {
         if (atomic_load(&s_epoch) != epoch) return NOTE4_MAGPIE_CANCELLED;
         if (esp_timer_get_time() - started >= 30000000) return NOTE4_MAGPIE_TIMEOUT;
         publish_wait(wait_state);
-        vTaskDelay(pdMS_TO_TICKS(50));
+        (void)esp_netif_sntp_sync_wait(pdMS_TO_TICKS(1000));
     }
     return NOTE4_MAGPIE_OK;
 }
@@ -81,8 +86,33 @@ static void worker(void *context) {
     unsigned epoch = 0U;
     bool previous_error_page = false;
     uint64_t next_status = 0U, next_diagnostic = 0U;
+    /* A keep-alive connection survives only from one step to an immediate next
+     * one (sign-in followed by the first read); it is closed otherwise. */
+    note4_magpie_transport_t transport;
+    note4_magpie_io_t io;
+    note4_magpie_transport_init(&transport, &s_epoch, 0U, &io);
     for (;;) {
-        if (xQueueReceive(s_commands, &command, pdMS_TO_TICKS(50)) == pdTRUE) {
+        /* Sleep until the earliest deadline: next poll, failure status refresh,
+         * error-page switch or diagnostics. Commands wake the task immediately. */
+        const uint64_t now = now_ms();
+        uint64_t wake = next_diagnostic;
+        if (atomic_load(&s_epoch) == epoch) {
+            if (poll.mode == NOTE4_POLL_ONLINE && !poll.halted && poll.next_due < wake) wake = poll.next_due;
+            if (poll.failed && !poll.halted && next_status < wake) wake = next_status;
+            if (poll.failed && poll.mode != NOTE4_POLL_SETUP && !previous_error_page &&
+                poll.failed_at + 120000U < wake) wake = poll.failed_at + 120000U;
+        }
+        TickType_t timeout = 0;
+        if (wake > now) {
+            const uint64_t delay = wake - now;
+            timeout = delay >= 3600000U ? pdMS_TO_TICKS(3600000U) : pdMS_TO_TICKS((uint32_t)delay);
+            if (timeout == 0) timeout = 1;
+        }
+        if (xQueueReceive(s_commands, &command, timeout) == pdTRUE) {
+            if (strcmp(command.settings.magpie.endpoint, poll.settings.magpie.endpoint) != 0) {
+                note4_magpie_transport_close(&transport);
+                note4_magpie_transport_forget_session();
+            }
             epoch = command.epoch;
             note4_magpie_poll_configure(&poll, &command.settings, command.mode, now_ms());
             memset(&command, 0, sizeof(command));
@@ -92,13 +122,14 @@ static void worker(void *context) {
             note4_resource_log("worker", 0U);
             next_diagnostic = now_ms() + 60000U;
         }
-        if (atomic_load(&s_epoch) != epoch) continue;
+        if (atomic_load(&s_epoch) != epoch) { note4_magpie_transport_close(&transport); continue; }
         const bool error_page = note4_magpie_poll_error_page(&poll, now_ms());
         if (previous_error_page != error_page || (poll.failed && !poll.halted && now_ms() >= next_status)) {
             publish(epoch, &poll, NULL); previous_error_page = error_page;
             next_status = now_ms() + 15000U;
         }
-        if (poll.mode != NOTE4_POLL_ONLINE || poll.halted || now_ms() < poll.next_due) continue;
+        if (poll.mode != NOTE4_POLL_ONLINE || poll.halted) { note4_magpie_transport_close(&transport); continue; }
+        if (now_ms() < poll.next_due) continue;
         if (!poll.failed) report(epoch, poll.login_pending ? NOTE4_MAGPIE_SIGNING_IN : NOTE4_MAGPIE_READING, poll.result);
         wait_state_t wait_state = {.epoch = epoch, .poll = &poll, .error_page = error_page};
         if (strncmp(poll.settings.magpie.endpoint, "https://", 8U) == 0 && time(NULL) < 1704067200) {
@@ -110,19 +141,30 @@ static void worker(void *context) {
                 publish(epoch, &poll, NULL); continue;
             }
         }
-        note4_magpie_transport_t transport;
-        note4_magpie_io_t io;
-        note4_magpie_transport_init(&transport, &s_epoch, epoch, &io);
+        transport.expected_epoch = epoch;
         transport.on_wait = publish_wait; transport.wait_context = &wait_state;
         note4_quota_snapshot_t *snapshot = NULL;
         if (note4_magpie_poll_step(&poll, &io, (int64_t)time(NULL), esp_random(), &snapshot)) {
             atomic_store(&s_publication, 0);
             const bool queued = publish(epoch, &poll, snapshot);
             if (snapshot != NULL) {
-                /* The bounded EPD operation owns completion. Do not time out here:
-                 * a late accepted page must never race a subsequent candidate. */
-                while (queued && note4_magpie_worker_current(epoch) && !atomic_load(&s_publication))
-                    vTaskDelay(pdMS_TO_TICKS(20));
+                /* Invariant: the EPD operation owns completion and always reports
+                 * accepted/rejected through note4_magpie_worker_published(), which
+                 * notifies this task. Bump the epoch first so a late acceptance can
+                 * never race the next candidate. The 10 min bound only guards
+                 * against a wedged display path. */
+                const TickType_t wait_started = xTaskGetTickCount();
+                while (queued && note4_magpie_worker_current(epoch) && !atomic_load(&s_publication)) {
+                    const TickType_t waited = xTaskGetTickCount() - wait_started;
+                    if (waited >= pdMS_TO_TICKS(600000U)) {
+                        portENTER_CRITICAL(&s_publication_lock);
+                        if (atomic_load(&s_publication) == 0) atomic_store(&s_publication, -1);
+                        portEXIT_CRITICAL(&s_publication_lock);
+                        ESP_LOGE("magpie_worker", "display publication did not complete; treating it as rejected");
+                        break;
+                    }
+                    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(600000U) - waited);
+                }
                 if (atomic_load(&s_publication) == 1) {
                     note4_quota_order_clear(&poll.order); poll.order = poll.pending_order;
                     memset(&poll.pending_order, 0, sizeof(poll.pending_order));
@@ -137,6 +179,7 @@ static void worker(void *context) {
         }
         note4_quota_snapshot_release(snapshot);
         previous_error_page = note4_magpie_poll_error_page(&poll, now_ms());
+        if (atomic_load(&s_epoch) != epoch || poll.next_due > now_ms() + 1000U) note4_magpie_transport_close(&transport);
     }
 }
 
@@ -147,7 +190,7 @@ esp_err_t note4_magpie_worker_init(note4_magpie_handler_t handler, void *context
     if (s_commands == NULL) return ESP_ERR_NO_MEM;
     /* Settings, HTTP parsing and TLS overflowed the original 16 KiB stack.
      * Share CPU time with idle during synchronous certificate verification. */
-    return xTaskCreate(worker, "magpie_web", 32768U, NULL, tskIDLE_PRIORITY, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    return xTaskCreate(worker, "magpie_web", 32768U, NULL, tskIDLE_PRIORITY, &s_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 unsigned note4_magpie_worker_update(const note4_settings_t *settings, note4_poll_mode_t mode) {
@@ -156,6 +199,7 @@ unsigned note4_magpie_worker_update(const note4_settings_t *settings, note4_poll
     command.epoch = atomic_fetch_add(&s_epoch, 1U) + 1U;
     portEXIT_CRITICAL(&s_publication_lock);
     (void)xQueueOverwrite(s_commands, &command);
+    if (s_task != NULL) xTaskNotifyGive(s_task); /* ends a pending publication wait */
     const unsigned epoch = command.epoch;
     memset(&command, 0, sizeof(command));
     return epoch;

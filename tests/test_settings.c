@@ -106,6 +106,23 @@ static void test_web_settings(void) {
     assert(note4_settings_serialize(&staged, &blob));
     assert(note4_settings_deserialize(&blob, &restored));
     assert(restored.web.interval_seconds == 60U && strcmp(restored.web.timezone, "UTC") == 0);
+    /* Bit 3 selects the display language; old blobs without it stay English. */
+    assert(saved.web.language == NOTE4_LANGUAGE_ENGLISH && restored.web.language == NOTE4_LANGUAGE_ENGLISH);
+    uint8_t chinese[sizeof(payload)];
+    memcpy(chinese, payload, sizeof(payload));
+    chinese[6] = 2U | 8U;
+    note4_settings_t localized = saved;
+    assert(note4_settings_apply_web(&localized, &saved, chinese, sizeof(chinese)) == NOTE4_SETTINGS_OK);
+    assert(localized.web.language == NOTE4_LANGUAGE_CHINESE && localized.web.adaptive_font && localized.web.layout == 0U);
+    uint8_t metadata[NOTE4_MAGPIE_ENDPOINT_MAX + NOTE4_TIMEZONE_MAX + 12U];
+    assert(note4_settings_web_metadata(&localized, metadata, sizeof(metadata)) != 0U && metadata[6] == (2U | 8U));
+    assert(note4_settings_serialize(&localized, &blob));
+    assert(note4_settings_deserialize(&blob, &restored) && restored.web.language == NOTE4_LANGUAGE_CHINESE);
+    chinese[6] = 15U;
+    assert(note4_settings_apply_web(&localized, &saved, chinese, sizeof(chinese)) == NOTE4_SETTINGS_OK);
+    assert(localized.web.allow_plain_http && localized.web.layout == 1U && localized.web.language == 1U);
+    chinese[6] = 16U;
+    assert(note4_settings_apply_web(&localized, &saved, chinese, sizeof(chinese)) == NOTE4_SETTINGS_INVALID);
     uint8_t equivalent[sizeof(payload) + 5U];
     memcpy(equivalent, payload, 14U);
     const char *canonical_url = "https://MAGPIE.test:443/";

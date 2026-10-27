@@ -21,6 +21,12 @@ static size_t first_slot(uint8_t mask) {
     return 0U;
 }
 
+uint32_t note4_provisioning_wifi_retry_delay_seconds(uint32_t failures) {
+    static const uint32_t delays[] = {60U, 300U, 900U, 1800U};
+    if (failures == 0U) failures = 1U;
+    return failures >= sizeof(delays) / sizeof(delays[0]) ? delays[3] : delays[failures - 1U];
+}
+
 void note4_provisioning_init(note4_provisioning_snapshot_t *snapshot) {
     if (snapshot == NULL) return;
     *snapshot = (note4_provisioning_snapshot_t){
@@ -130,6 +136,12 @@ void note4_provisioning_apply(note4_provisioning_snapshot_t *snapshot,
     case NOTE4_PROVISIONING_EVENT_RETRY:
         if (snapshot->state == NOTE4_PROVISIONING_CONNECTED) {
             snapshot->state = NOTE4_PROVISIONING_CONNECTING;
+        } else if (snapshot->state == NOTE4_PROVISIONING_FAILURE) {
+            /* Automatic backoff retry: start a fresh three-round cycle. */
+            snapshot->state = NOTE4_PROVISIONING_CONNECTING;
+            snapshot->attempted_mask = 0U;
+            snapshot->round = 1U;
+            snapshot->slot = first_slot(configured_mask);
         }
         break;
     }

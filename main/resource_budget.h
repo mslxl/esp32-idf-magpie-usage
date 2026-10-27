@@ -11,6 +11,17 @@
 #define NOTE4_INTERNAL_RESERVE (32U * 1024U)
 #define NOTE4_PSRAM_RESERVE (256U * 1024U)
 
+/* Dedicated settings NVS partition (partitions.csv "note4_cfg"). NVS pages hold
+ * 126 entries of 32 bytes; one page stays reserved for garbage collection. The
+ * two-bank bundle needs both banks plus a transient copy of one chunk while
+ * an existing key is overwritten, so require three maximum bundles. */
+#define NOTE4_CONFIG_PARTITION_SIZE (0x180000U)
+#define NOTE4_NVS_PAGE_ENTRIES 126U
+#define NOTE4_CONFIG_PARTITION_ENTRIES ((NOTE4_CONFIG_PARTITION_SIZE / 4096U - 1U) * NOTE4_NVS_PAGE_ENTRIES)
+#define NOTE4_BUNDLE_MAX_ENTRIES ((NOTE4_DOCUMENT_BUDGET + 1536U) / 32U + ((NOTE4_DOCUMENT_BUDGET + 1536U) / 3072U + 1U) * 3U + 16U)
+_Static_assert(NOTE4_CONFIG_PARTITION_ENTRIES >= 3U * NOTE4_BUNDLE_MAX_ENTRIES,
+    "note4_cfg partition is too small for two maximum settings/preferences banks");
+
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
 #include "esp_log.h"

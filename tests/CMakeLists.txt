@@ -16,7 +16,7 @@ add_test(NAME display_adapter COMMAND test_display_adapter)
 
 add_executable(test_provisioning_core
     test_provisioning_core.c
-    ../main/wifi_config.c
+    ../main/wifi_config.c ../main/note4_bytes.c
     ../main/provisioning_state.c)
 target_include_directories(test_provisioning_core PRIVATE ../main)
 target_compile_features(test_provisioning_core PRIVATE c_std_11)
@@ -40,7 +40,7 @@ endif()
 add_test(NAME ble_protocol COMMAND test_ble_protocol)
 
 add_executable(test_settings test_settings.c ../main/settings.c ../main/magpie_config.c
-    ../main/wifi_config.c ../main/provisioning_state.c)
+    ../main/wifi_config.c ../main/note4_bytes.c ../main/provisioning_state.c)
 target_include_directories(test_settings PRIVATE ../main)
 target_compile_features(test_settings PRIVATE c_std_11)
 if(MSVC)
@@ -51,7 +51,7 @@ endif()
 add_test(NAME settings COMMAND test_settings)
 
 add_executable(test_config_store test_config_store.c ../main/config_store.c ../main/settings.c
-    ../main/magpie_config.c ../main/wifi_config.c)
+    ../main/magpie_config.c ../main/wifi_config.c ../main/note4_bytes.c)
 target_include_directories(test_config_store PRIVATE idf-stubs ../main)
 target_compile_features(test_config_store PRIVATE c_std_11)
 if(MSVC)
@@ -62,7 +62,7 @@ endif()
 add_test(NAME config_store COMMAND test_config_store)
 
 add_executable(test_magpie_client test_magpie_client.c ../main/magpie_client.c ../main/settings.c
-    ../main/magpie_config.c ../main/wifi_config.c ../main/quota_snapshot.c)
+    ../main/magpie_config.c ../main/wifi_config.c ../main/note4_bytes.c ../main/quota_snapshot.c)
 target_include_directories(test_magpie_client PRIVATE ../main)
 target_compile_features(test_magpie_client PRIVATE c_std_11)
 if(MSVC)
@@ -84,7 +84,7 @@ endif()
 add_test(NAME quota_snapshot COMMAND test_quota_snapshot)
 
 add_executable(test_magpie_poll test_magpie_poll.c ../main/magpie_poll.c ../main/magpie_client.c
-    ../main/quota_snapshot.c ../main/quota_order.c ../main/settings.c ../main/magpie_config.c ../main/wifi_config.c)
+    ../main/quota_snapshot.c ../main/quota_order.c ../main/settings.c ../main/magpie_config.c ../main/wifi_config.c ../main/note4_bytes.c)
 target_include_directories(test_magpie_poll PRIVATE ../main)
 target_compile_features(test_magpie_poll PRIVATE c_std_11)
 if(MSVC)
@@ -95,7 +95,7 @@ else()
 endif()
 add_test(NAME magpie_poll COMMAND test_magpie_poll)
 
-add_executable(test_account_directory test_account_directory.c ../main/account_directory.c ../main/quota_snapshot.c)
+add_executable(test_account_directory test_account_directory.c ../main/account_directory.c ../main/note4_bytes.c ../main/quota_snapshot.c)
 target_include_directories(test_account_directory PRIVATE ../main)
 target_compile_features(test_account_directory PRIVATE c_std_11)
 if(MSVC)
@@ -105,7 +105,7 @@ else()
 endif()
 add_test(NAME account_directory COMMAND test_account_directory)
 
-add_executable(test_display_prefs test_display_prefs.c ../main/display_prefs.c ../main/account_directory.c ../main/quota_snapshot.c)
+add_executable(test_display_prefs test_display_prefs.c ../main/display_prefs.c ../main/account_directory.c ../main/note4_bytes.c ../main/quota_snapshot.c)
 target_include_directories(test_display_prefs PRIVATE ../main)
 target_compile_features(test_display_prefs PRIVATE c_std_11)
 if(MSVC)
@@ -115,7 +115,7 @@ else()
 endif()
 add_test(NAME display_prefs COMMAND test_display_prefs)
 
-add_executable(test_bundle_store test_bundle_store.c ../main/config_store.c ../main/settings.c ../main/magpie_config.c ../main/wifi_config.c)
+add_executable(test_bundle_store test_bundle_store.c ../main/config_store.c ../main/settings.c ../main/magpie_config.c ../main/wifi_config.c ../main/note4_bytes.c)
 target_include_directories(test_bundle_store PRIVATE idf-stubs ../main)
 target_compile_features(test_bundle_store PRIVATE c_std_11)
 if(MSVC)
@@ -135,7 +135,7 @@ else()
 endif()
 add_test(NAME quota_order COMMAND test_quota_order)
 
-add_library(fault_models OBJECT ../main/quota_snapshot.c ../main/quota_order.c ../main/account_directory.c ../main/display_prefs.c)
+add_library(fault_models OBJECT ../main/quota_snapshot.c ../main/quota_order.c ../main/account_directory.c ../main/display_prefs.c ../main/note4_bytes.c)
 target_include_directories(fault_models PRIVATE ../main)
 target_compile_features(fault_models PRIVATE c_std_11)
 add_executable(test_resource_failures test_resource_failures.c $<TARGET_OBJECTS:fault_models>)

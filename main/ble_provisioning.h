@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #include "ble_protocol.h"
 
@@ -25,7 +27,12 @@ typedef struct {
     uint8_t payload[NOTE4_BLE_MAX_TRANSACTION];
 } note4_ble_event_t;
 
+/* init creates the event queue only; start/stop bring the NimBLE host and
+ * controller up and down (setup entry/exit). set_enabled(true) starts if needed. */
 esp_err_t note4_ble_provisioning_init(void);
+esp_err_t note4_ble_provisioning_start(void);
+void note4_ble_provisioning_stop(void);
+QueueHandle_t note4_ble_provisioning_queue(void);
 const char *note4_ble_provisioning_name(void);
 void note4_ble_provisioning_set_enabled(bool enabled);
 bool note4_ble_provisioning_receive(note4_ble_event_t *event, uint32_t timeout_ms);

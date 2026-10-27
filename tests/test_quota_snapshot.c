@@ -27,5 +27,21 @@ int main(void) {
     const char *invalid_split = "[{\"provider\":\"x\",\"balanceSplit\":[{\"text\":12}]}]";
     snapshot = NULL;
     CHECK(note4_quota_snapshot_parse(invalid_split, strlen(invalid_split), &snapshot) == NOTE4_QUOTA_INVALID);
+    /* Arena bounds: escapes, commas and colons inside strings, nesting and smart ranks. */
+    const char *dense = "[{\"provider\":\"a,b:[c]\\\"\",\"windows\":[{\"name\":\"\\u00e9\\ud83d\\ude00\",\"used\":-1.5e3,\"unlimited\":true}],\"last\":false,\"until\":null},"
+        "{\"provider\":\"x\",\"balanceSplit\":[{\"text\":\"1\",\"percent\":50}]}]";
+    CHECK(note4_quota_snapshot_parse(dense, strlen(dense), &snapshot) == NOTE4_QUOTA_OK);
+    CHECK(strcmp(note4_quota_text(snapshot, 0U, "provider"), "a,b:[c]\"") == 0);
+    CHECK(strcmp(note4_quota_window_text(snapshot, 0U, 0U, "name"), "\xc3\xa9\xf0\x9f\x98\x80") == 0);
+    CHECK(strcmp(note4_quota_window_text(snapshot, 0U, 0U, "used"), "-1.5e3") == 0);
+    CHECK(note4_quota_window_flag(snapshot, 0U, 0U, "unlimited") && !note4_quota_flag(snapshot, 0U, "last"));
+    CHECK(strcmp(note4_quota_balance_text(snapshot, 1U, 0U, "percent"), "50") == 0);
+    const size_t order[] = {1U, 0U};
+    CHECK(note4_quota_set_smart_order(snapshot, order) == NOTE4_QUOTA_OK && note4_quota_smart_rank(snapshot, 1U) == 0U);
+    note4_quota_snapshot_retain(snapshot);
+    note4_quota_snapshot_release(snapshot);
+    note4_quota_snapshot_release(snapshot);
+    const char *unterminated = "[{\"provider\":\"x}]";
+    CHECK(note4_quota_snapshot_parse(unterminated, strlen(unterminated), &snapshot) == NOTE4_QUOTA_INVALID);
     return 0;
 }

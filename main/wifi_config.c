@@ -2,16 +2,7 @@
 
 #include <string.h>
 
-static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t size) {
-    crc = ~crc;
-    for (size_t index = 0; index < size; ++index) {
-        crc ^= data[index];
-        for (unsigned bit = 0; bit < 8U; ++bit) {
-            crc = (crc >> 1U) ^ (0xEDB88320UL & (uint32_t)-(int32_t)(crc & 1U));
-        }
-    }
-    return ~crc;
-}
+#include "note4_bytes.h"
 
 static bool bounded_text(const char *text, size_t max, uint8_t *length) {
     if (text == NULL || length == NULL) return false;
@@ -94,8 +85,8 @@ bool note4_wifi_config_serialize(const note4_wifi_config_t *config,
     blob->generation = generation;
     blob->config = *config;
     blob->config.generation = generation;
-    blob->crc32 = crc32_update(0U, (const uint8_t *)blob,
-                               offsetof(note4_wifi_blob_t, crc32));
+    blob->crc32 = note4_crc32((const uint8_t *)blob,
+                              offsetof(note4_wifi_blob_t, crc32));
     return true;
 }
 
@@ -104,7 +95,7 @@ bool note4_wifi_config_deserialize(const note4_wifi_blob_t *blob,
     if (blob == NULL || config == NULL || blob->magic != NOTE4_WIFI_CONFIG_MAGIC ||
         blob->version != NOTE4_WIFI_CONFIG_VERSION ||
         blob->payload_size != sizeof(blob->config) ||
-        crc32_update(0U, (const uint8_t *)blob, offsetof(note4_wifi_blob_t, crc32)) != blob->crc32 ||
+        note4_crc32((const uint8_t *)blob, offsetof(note4_wifi_blob_t, crc32)) != blob->crc32 ||
         !note4_wifi_config_validate(&blob->config)) return false;
     *config = blob->config;
     return true;

@@ -7,6 +7,7 @@
 #include "esp_mac.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -25,11 +26,16 @@ extern void ble_store_config_init(void);
 static QueueHandle_t s_events;
 static StaticQueue_t s_event_queue;
 #define NOTE4_BLE_EVENT_CAPACITY 12U
-static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+/* Written by the NimBLE host task, read by the coordinator. */
+static _Atomic uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_handle;
-static bool s_status_subscribed;
+static atomic_bool s_status_subscribed;
 static atomic_bool s_enabled;
 static atomic_bool s_synced;
+/* At most one ACTIVITY event is queued; the receiver clears the flag. */
+static atomic_bool s_activity_pending;
+static bool s_running;
+static esp_pm_lock_handle_t s_pm_lock;
 static uint8_t s_addr_type;
 static char s_device_name[sizeof("magpie-usage-000000")];
 
@@ -73,7 +79,7 @@ static int characteristic_access(uint16_t conn_handle, uint16_t attr_handle,
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR ||
         (attr_handle != s_control_handle && attr_handle != s_data_handle)) return BLE_ATT_ERR_UNLIKELY;
-    if (s_conn_handle != conn_handle || !connection_is_authenticated(conn_handle)) {
+    if (atomic_load(&s_conn_handle) != conn_handle || !connection_is_authenticated(conn_handle)) {
         (void)ble_gap_security_initiate(conn_handle);
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
@@ -109,10 +115,11 @@ static int characteristic_access(uint16_t conn_handle, uint16_t attr_handle,
     s_rx.next++;
     s_rx.deadline = xTaskGetTickCount() + pdMS_TO_TICKS(5000);
     if (s_rx.next != s_rx.total) {
-        const note4_ble_event_t activity = {.type = NOTE4_BLE_EVENT_ACTIVITY, .conn_handle = conn_handle};
-        if (xQueueSend(s_events, &activity, 0) != pdTRUE) {
-            memset(&s_rx, 0, sizeof(s_rx));
-            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        /* ACTIVITY only refreshes the coordinator's transaction deadline, so one
+         * pending event is enough however many chunks arrive meanwhile. */
+        if (!atomic_exchange(&s_activity_pending, true)) {
+            const note4_ble_event_t activity = {.type = NOTE4_BLE_EVENT_ACTIVITY, .conn_handle = conn_handle};
+            if (xQueueSend(s_events, &activity, 0) != pdTRUE) atomic_store(&s_activity_pending, false);
         }
         return 0;
     }
@@ -155,15 +162,15 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            s_conn_handle = event->connect.conn_handle;
-            (void)ble_gap_security_initiate(s_conn_handle);
+            atomic_store(&s_conn_handle, event->connect.conn_handle);
+            (void)ble_gap_security_initiate(event->connect.conn_handle);
         } else start_advertising();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         queued.type = NOTE4_BLE_EVENT_DISCONNECTED;
         queued.conn_handle = event->disconnect.conn.conn_handle;
-        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        s_status_subscribed = false;
+        atomic_store(&s_conn_handle, BLE_HS_CONN_HANDLE_NONE);
+        atomic_store(&s_status_subscribed, false);
         memset(&s_rx, 0, sizeof(s_rx));
         (void)xQueueSend(s_events, &queued, 0);
         start_advertising();
@@ -190,7 +197,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         /* A stale bond must be removed explicitly in the central's Bluetooth settings. */
         return BLE_GAP_REPEAT_PAIRING_IGNORE;
     case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == s_status_handle) s_status_subscribed = event->subscribe.cur_notify != 0;
+        if (event->subscribe.attr_handle == s_status_handle) atomic_store(&s_status_subscribed, event->subscribe.cur_notify != 0);
         break;
     default: break;
     }
@@ -199,7 +206,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
 
 static void start_advertising(void) {
     if (!atomic_load(&s_synced) || !atomic_load(&s_enabled) ||
-        s_conn_handle != BLE_HS_CONN_HANDLE_NONE || ble_gap_adv_active()) return;
+        atomic_load(&s_conn_handle) != BLE_HS_CONN_HANDLE_NONE || ble_gap_adv_active()) return;
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids128 = (ble_uuid128_t *)&s_service_uuid;
@@ -225,7 +232,9 @@ static void start_advertising(void) {
 }
 
 void note4_ble_provisioning_set_enabled(bool enabled) {
+    if (enabled && !s_running && note4_ble_provisioning_start() != ESP_OK) return;
     atomic_store(&s_enabled, enabled);
+    if (!s_running) return;
     if (enabled) start_advertising();
     else if (atomic_load(&s_synced)) (void)ble_gap_adv_stop();
 }
@@ -247,6 +256,7 @@ const char *note4_ble_provisioning_name(void) {
 }
 
 esp_err_t note4_ble_provisioning_init(void) {
+    if (s_events != NULL) return ESP_OK;
     uint8_t mac[6];
     esp_err_t err = esp_read_mac(mac, ESP_MAC_BT);
     if (err != ESP_OK) return err;
@@ -260,15 +270,30 @@ esp_err_t note4_ble_provisioning_init(void) {
     s_events = xQueueCreateStatic(NOTE4_BLE_EVENT_CAPACITY, sizeof(note4_ble_event_t),
         storage, &s_event_queue);
     if (s_events == NULL) { heap_caps_free(storage); return ESP_ERR_NO_MEM; }
-    err = nimble_port_init();
+    err = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "note4_ble", &s_pm_lock);
+    if (err == ESP_ERR_NOT_SUPPORTED) err = ESP_OK;
+    return err;
+}
+
+/* The controller and host run only while setup is visible. Light sleep is held
+ * off meanwhile so advertising and the connection keep their timing. */
+esp_err_t note4_ble_provisioning_start(void) {
+    if (s_events == NULL) return ESP_ERR_INVALID_STATE;
+    if (s_running) return ESP_OK;
+    if (s_pm_lock != NULL) (void)esp_pm_lock_acquire(s_pm_lock);
+    esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
-        vQueueDelete(s_events); s_events = NULL; heap_caps_free(storage);
+        if (s_pm_lock != NULL) (void)esp_pm_lock_release(s_pm_lock);
         return err;
     }
     ble_svc_gap_init();
     ble_svc_gatt_init();
     if (ble_svc_gap_device_name_set(s_device_name) != 0 ||
-        ble_gatts_count_cfg(s_services) != 0 || ble_gatts_add_svcs(s_services) != 0) return ESP_FAIL;
+        ble_gatts_count_cfg(s_services) != 0 || ble_gatts_add_svcs(s_services) != 0) {
+        (void)nimble_port_deinit();
+        if (s_pm_lock != NULL) (void)esp_pm_lock_release(s_pm_lock);
+        return ESP_FAIL;
+    }
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
@@ -277,19 +302,60 @@ esp_err_t note4_ble_provisioning_init(void) {
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;
     ble_store_config_init();
+    s_running = true;
     nimble_port_freertos_init(host_task);
+    ESP_LOGI(TAG, "BLE started");
     return ESP_OK;
 }
 
+/* Called by the coordinator only, after its final ACK. nimble_port_deinit also
+ * disables and deinitializes the controller; its memory is not released, so the
+ * stack can start again on the next setup entry. */
+void note4_ble_provisioning_stop(void) {
+    if (!s_running) return;
+    atomic_store(&s_enabled, false);
+    if (atomic_load(&s_synced)) (void)ble_gap_adv_stop();
+    const uint16_t conn = atomic_load(&s_conn_handle);
+    if (conn != BLE_HS_CONN_HANDLE_NONE) {
+        /* Grace period: let a queued final notification reach the central. */
+        vTaskDelay(pdMS_TO_TICKS(300));
+        (void)ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+        for (unsigned waited = 0U; waited < 50U && atomic_load(&s_conn_handle) != BLE_HS_CONN_HANDLE_NONE; ++waited) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    const int rc = nimble_port_stop();
+    if (rc == 0) (void)nimble_port_deinit();
+    else ESP_LOGE(TAG, "NimBLE stop failed: %d", rc);
+    atomic_store(&s_synced, false);
+    atomic_store(&s_conn_handle, BLE_HS_CONN_HANDLE_NONE);
+    atomic_store(&s_status_subscribed, false);
+    memset(&s_rx, 0, sizeof(s_rx));
+    s_running = false;
+    if (s_pm_lock != NULL) (void)esp_pm_lock_release(s_pm_lock);
+    ESP_LOGI(TAG, "BLE stopped");
+}
+
 bool note4_ble_provisioning_receive(note4_ble_event_t *event, uint32_t timeout_ms) {
-    return event != NULL && xQueueReceive(s_events, event, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    if (event == NULL || s_events == NULL ||
+        xQueueReceive(s_events, event, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
+    if (event->type == NOTE4_BLE_EVENT_ACTIVITY) atomic_store(&s_activity_pending, false);
+    return true;
+}
+
+QueueHandle_t note4_ble_provisioning_queue(void) {
+    return s_events;
 }
 
 esp_err_t note4_ble_provisioning_notify(const note4_ble_frame_t *frame) {
-    if (frame == NULL || !s_status_subscribed || s_conn_handle == BLE_HS_CONN_HANDLE_NONE ||
-        !connection_is_authenticated(s_conn_handle)) return ESP_ERR_INVALID_STATE;
-    /* 8 payload bytes + 12 framing bytes fit even the default ATT MTU of 23. */
-    const size_t chunk_size = 8U;
+    const uint16_t conn = atomic_load(&s_conn_handle);
+    if (frame == NULL || !s_running || !atomic_load(&s_status_subscribed) || conn == BLE_HS_CONN_HANDLE_NONE ||
+        !connection_is_authenticated(conn)) return ESP_ERR_INVALID_STATE;
+    /* A notification carries ATT_MTU - 3 bytes, 12 of them framing. The default
+     * MTU of 23 still yields the 8-byte chunks every page version accepts. */
+    const uint16_t mtu = ble_att_mtu(conn);
+    size_t chunk_size = mtu > 3U + 12U + 8U ? mtu - 3U - 12U : 8U;
+    if (chunk_size > NOTE4_BLE_MAX_PAYLOAD) chunk_size = NOTE4_BLE_MAX_PAYLOAD;
     const size_t count = frame->payload_length == 0U ? 1U : (frame->payload_length + chunk_size - 1U) / chunk_size;
     if (count > 255U) return ESP_ERR_INVALID_SIZE;
     for (size_t sequence = 0U; sequence < count; ++sequence) {
@@ -300,17 +366,19 @@ esp_err_t note4_ble_provisioning_notify(const note4_ble_frame_t *frame) {
         chunk.payload_length = frame->payload_length - offset;
         if (chunk.payload_length > chunk_size) chunk.payload_length = chunk_size;
         chunk.payload = frame->payload_length == 0U ? NULL : frame->payload + offset;
-        uint8_t encoded[20];
+        uint8_t encoded[NOTE4_BLE_MAX_FRAME];
         size_t size;
         if (!note4_ble_frame_encode(&chunk, encoded, sizeof(encoded), &size)) return ESP_ERR_INVALID_ARG;
+        /* Wait up to ~100 ms for host buffers; give up as soon as the link drops. */
         int rc = BLE_HS_ENOMEM;
-        for (unsigned attempt = 0U; attempt < 50U; ++attempt) {
+        for (unsigned attempt = 0U; attempt < 20U; ++attempt) {
+            if (atomic_load(&s_conn_handle) != conn) return ESP_ERR_INVALID_STATE;
             struct os_mbuf *om = ble_hs_mbuf_from_flat(encoded, size);
-            rc = om == NULL ? BLE_HS_ENOMEM : ble_gatts_notify_custom(s_conn_handle, s_status_handle, om);
+            rc = om == NULL ? BLE_HS_ENOMEM : ble_gatts_notify_custom(conn, s_status_handle, om);
             if (rc != BLE_HS_ENOMEM && rc != BLE_HS_EBUSY) break;
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(pdMS_TO_TICKS(5));
         }
-        if (rc != 0) return ESP_FAIL;
+        if (rc != 0) return rc == BLE_HS_ENOMEM || rc == BLE_HS_EBUSY ? ESP_ERR_TIMEOUT : ESP_FAIL;
     }
     return ESP_OK;
 }
@@ -324,6 +392,6 @@ esp_err_t note4_ble_provisioning_ack(uint16_t conn_handle, uint16_t request_id,
         .request_id = request_id, .total_sequences = 1U,
         .payload_length = sizeof(payload), .payload = payload,
     };
-    if (conn_handle != s_conn_handle) return ESP_ERR_INVALID_STATE;
+    if (conn_handle != atomic_load(&s_conn_handle)) return ESP_ERR_INVALID_STATE;
     return note4_ble_provisioning_notify(&frame);
 }

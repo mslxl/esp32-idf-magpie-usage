@@ -33,6 +33,9 @@ typedef struct {
 } note4_wifi_scan_result_t;
 
 esp_err_t note4_wifi_manager_init(note4_wifi_event_handler_t handler, void *context);
+/* Radio power: start is implicit in connect/scan; stop disconnects first. */
+esp_err_t note4_wifi_manager_start(void);
+esp_err_t note4_wifi_manager_stop(void);
 esp_err_t note4_wifi_manager_set_config(const note4_wifi_config_t *config);
 esp_err_t note4_wifi_manager_connect(size_t slot);
 uint32_t note4_wifi_manager_attempt(void);

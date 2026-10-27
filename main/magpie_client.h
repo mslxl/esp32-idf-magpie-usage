@@ -28,6 +28,9 @@ typedef struct {
     uint64_t (*now_ms)(void *context);
     void (*wait)(void *context);
     bool (*cancelled)(void *context);
+    /* Optional: called instead of close when an exchange ends. reusable means the
+     * response was consumed exactly and the server allows another request. */
+    void (*release)(void *context, bool reusable);
 } note4_magpie_io_t;
 
 typedef struct {

@@ -29,16 +29,34 @@ static entry_t *entry(const char *key) {
     for (size_t i = 0; i < count; ++i) if (!strcmp(entries[i].key, key)) return &entries[i];
     CHECK(count < 256 && strlen(key) < 16); entry_t *e = &entries[count++]; memcpy(e->key, key, strlen(key) + 1); return e;
 }
+/* Handle 1 is the settings partition; handle 3 holds the default partition's
+ * format marker. The default partition has no legacy namespace here. */
+static unsigned char meta_ready;
 esp_err_t nvs_flash_init(void) { return ESP_OK; }
+esp_err_t nvs_flash_erase(void) { return ESP_OK; }
+esp_err_t nvs_flash_init_partition(const char *label) { (void)label; return ESP_OK; }
+esp_err_t nvs_flash_erase_partition(const char *label) { (void)label; return ESP_OK; }
 esp_err_t nvs_open(const char *name, int mode, nvs_handle_t *handle) { (void)name; (void)mode; *handle = 1; return ESP_OK; }
+esp_err_t nvs_open_from_partition(const char *part, const char *name, int mode, nvs_handle_t *handle) {
+    if (strcmp(part, "nvs") != 0) return nvs_open(name, mode, handle);
+    if (strcmp(name, "note4_meta") != 0 || (mode == NVS_READONLY && !meta_ready)) return ESP_ERR_NVS_NOT_FOUND;
+    *handle = 3; return ESP_OK;
+}
+void nvs_close(nvs_handle_t handle) { (void)handle; }
+esp_err_t nvs_erase_all(nvs_handle_t handle) { (void)handle; return ESP_OK; }
+esp_err_t nvs_get_stats(const char *part, nvs_stats_t *stats) {
+    (void)part; memset(stats, 0, sizeof(*stats)); stats->available_entries = 100000; return ESP_OK;
+}
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *data, size_t *size) {
-    (void)handle; if (powered_off) return ESP_FAIL;
+    if (handle == 3) { (void)key; if (!meta_ready) return ESP_ERR_NVS_NOT_FOUND; *size = 1; if (data) *(unsigned char *)data = 1; return ESP_OK; }
+    if (powered_off) return ESP_FAIL;
     entry_t *e = entry(key); if (!e->data) return ESP_ERR_NVS_NOT_FOUND;
     if (data && *size < e->length) return ESP_ERR_NVS_INVALID_LENGTH;
     *size = e->length; if (data) memcpy(data, e->data, e->length); return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, size_t size) {
-    (void)handle; if (powered_off) return ESP_FAIL;
+    if (handle == 3) { (void)key; (void)data; (void)size; meta_ready = 1; return ESP_OK; }
+    if (powered_off) return ESP_FAIL;
     if (++writes == fail_write) return ESP_ERR_NO_MEM;
     entry_t *e = entry(key);
     if (immediate) { uint8_t *copy = malloc(size); CHECK(copy); memcpy(copy, data, size); free(e->data); e->data = copy; e->length = size; return checkpoint(); }
@@ -52,7 +70,8 @@ esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key) {
     return checkpoint();
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
-    (void)handle; if (powered_off) return ESP_FAIL;
+    if (handle == 3) return ESP_OK;
+    if (powered_off) return ESP_FAIL;
     const bool failed = ++commits == fail_commit;
     for (size_t i = 0; i < count; ++i) {
         entry_t *e = &entries[i];

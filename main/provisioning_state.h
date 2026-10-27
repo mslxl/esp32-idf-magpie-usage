@@ -44,7 +44,7 @@ typedef struct {
     uint8_t attempted_mask;
     bool has_committed_config;
     bool has_staged_config;
-    bool storage_error;
+    uint8_t storage_error;
     bool pairing;
     uint32_t passkey;
     uint8_t magpie_phase;
@@ -55,7 +55,18 @@ typedef struct {
     char display_timezone[64];
     uint8_t display_layout;
     bool adaptive_font;
+    uint8_t display_language;
+    uint32_t wifi_retry_seconds;
 } note4_provisioning_snapshot_t;
+
+/* storage_error values. */
+#define NOTE4_STORAGE_OK 0U
+#define NOTE4_STORAGE_FAILED 1U      /* OK retries initialization. */
+#define NOTE4_STORAGE_NEEDS_ERASE 2U /* OK retries; holding DOWN erases settings storage. */
+
+/* Automatic Wi-Fi retry delay after the given number of consecutive FAILURE
+ * entries (1-based): 1, 5, 15, then 30 minutes. */
+uint32_t note4_provisioning_wifi_retry_delay_seconds(uint32_t failures);
 
 void note4_provisioning_init(note4_provisioning_snapshot_t *snapshot);
 void note4_provisioning_apply(note4_provisioning_snapshot_t *snapshot,
