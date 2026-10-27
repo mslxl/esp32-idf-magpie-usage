@@ -9,8 +9,10 @@
 #define NOTE4_HEIGHT 300U
 #define NOTE4_ROW_BYTES (NOTE4_WIDTH / 8U)
 #define NOTE4_FRAME_BYTES (NOTE4_ROW_BYTES * NOTE4_HEIGHT)
-#define NOTE4_4BPP_ROW_BYTES (NOTE4_WIDTH / 2U)
-#define NOTE4_4BPP_FRAME_BYTES (NOTE4_4BPP_ROW_BYTES * NOTE4_HEIGHT)
+/* Each damage rectangle is a separate SSD2683 waveform pass, so nearby bands
+ * are merged and the total is capped. */
+#define NOTE4_DAMAGE_MAX_RECTS 4U
+#define NOTE4_DAMAGE_MERGE_ROWS 16U
 
 typedef struct {
     size_t x;
@@ -19,22 +21,21 @@ typedef struct {
     size_t height;
 } note4_rect_t;
 
-/* Source is a full RGB565 frame with source_stride pixels per row. */
-bool note4_rgb565_to_1bpp_rect(const uint16_t *source, size_t source_pixels,
-                               size_t source_stride, note4_rect_t rect,
-                               uint8_t *destination, size_t destination_bytes,
-                               uint8_t threshold);
+/*
+ * Frames are 400x300 1bpp, 1 = black, MSB first, NOTE4_ROW_BYTES per row.
+ * Writes up to max_rects byte-aligned row-band rectangles covering every
+ * differing pixel, ordered top to bottom, and returns their count. Bands
+ * separated by at most NOTE4_DAMAGE_MERGE_ROWS unchanged rows are merged;
+ * beyond max_rects the closest neighbours are merged.
+ */
+size_t note4_frame_damage(const uint8_t *previous, const uint8_t *next,
+                          note4_rect_t *rects, size_t max_rects);
 
-/* Source is a full RGB565 frame. Destination is the complete 4bpp frame. */
-bool note4_rgb565_to_4bpp_frame(const uint16_t *source, size_t source_pixels,
-                                size_t source_stride, const note4_rect_t *gray_regions,
-                                size_t gray_region_count, uint8_t *destination,
-                                size_t destination_bytes, uint8_t threshold);
+/* Copies a byte-aligned rectangle of the frame into panel order (1 = white),
+ * ceil(width / 8) bytes per row. */
+bool note4_frame_pack(const uint8_t *frame, note4_rect_t rect,
+                      uint8_t *destination, size_t destination_bytes);
 
-/* Compatibility helper for full-width RGB565 strips. */
-bool note4_rgb565_to_1bpp_rows(const uint16_t *source, size_t source_pixels,
-                               size_t first_row, size_t row_count,
-                               uint8_t *frame, size_t frame_bytes,
-                               uint8_t threshold);
+bool note4_rect_valid(note4_rect_t rect);
 
 #endif

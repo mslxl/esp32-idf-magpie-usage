@@ -32,7 +32,6 @@ fn glyph(cp: char, size: u8, bold: bool) -> Option<(&'static [u8], usize, usize)
     None
 }
 pub fn covered(cp: char, size: u8) -> bool { glyph(cp, size, false).is_some() }
-pub fn advance(cp: char, size: u8) -> i16 { advance_weight(cp,size,false) }
 pub fn advance_weight(cp:char,size:u8,bold:bool)->i16 {
     glyph(cp,size,bold).map(|(b,at,_)|b[at+12] as i16).unwrap_or(size as i16)
 }
@@ -40,17 +39,55 @@ pub fn measure(text: &str, size: u8) -> i16 { measure_weight(text,size,false) }
 pub fn measure_weight(text:&str,size:u8,bold:bool)->i16 {
     text.chars().map(|c|advance_weight(c,size,bold) as i32).sum::<i32>().min(32767) as i16
 }
-pub struct Canvas<'a>(pub &'a mut [u16]);
+/// Size of one packed 1bpp frame: 400x300, MSB first, 1 = black.
+pub const FRAME_BYTES: usize = STRIDE * HEIGHT as usize;
+pub const WIDTH: i16 = 400;
+pub const HEIGHT: i16 = 300;
+const STRIDE: usize = WIDTH as usize / 8;
+
+/// Drawing surface over the presenter's 1bpp frame (1 = black).
+pub struct Canvas<'a>(pub &'a mut [u8]);
 impl Canvas<'_> {
-    pub fn pixel(&mut self, x: i16, y: i16) {
-        if (0..400).contains(&x) && (0..300).contains(&y) { self.0[y as usize * 400 + x as usize] = 0; }
+    pub fn clear(&mut self) {
+        self.0.fill(0);
     }
-    pub fn rect(&mut self, x: i16, y: i16, w: i16, h: i16) {
-        for py in y.max(0)..(y + h).min(300) {
-            for px in x.max(0)..(x + w).min(400) { self.pixel(px, py); }
+    fn set(&mut self, x: i16, y: i16, black: bool) {
+        if (0..WIDTH).contains(&x) && (0..HEIGHT).contains(&y) {
+            let byte = &mut self.0[y as usize * STRIDE + x as usize / 8];
+            let mask = 0x80 >> (x % 8);
+            if black { *byte |= mask } else { *byte &= !mask }
         }
     }
-    pub fn text(&mut self, text: &str, mut x: i16, y: i16, size: u8, bold: bool) {
+    pub fn pixel(&mut self, x: i16, y: i16) {
+        self.set(x, y, true);
+    }
+    fn fill(&mut self, x: i16, y: i16, w: i16, h: i16, black: bool) {
+        for py in y.max(0)..(y + h).min(HEIGHT) {
+            for px in x.max(0)..(x + w).min(WIDTH) {
+                self.set(px, py, black);
+            }
+        }
+    }
+    /// Filled black rectangle.
+    pub fn rect(&mut self, x: i16, y: i16, w: i16, h: i16) {
+        self.fill(x, y, w, h, true);
+    }
+    /// Filled white rectangle.
+    pub fn erase(&mut self, x: i16, y: i16, w: i16, h: i16) {
+        self.fill(x, y, w, h, false);
+    }
+    /// One-pixel black outline.
+    pub fn frame(&mut self, x: i16, y: i16, w: i16, h: i16) {
+        self.rect(x, y, w, 1);
+        self.rect(x, y + h - 1, w, 1);
+        self.rect(x, y, 1, h);
+        self.rect(x + w - 1, y, 1, h);
+    }
+    pub fn text(&mut self, text: &str, x: i16, y: i16, size: u8, bold: bool) {
+        self.text_ink(text, x, y, size, bold, true);
+    }
+    /// Text in black, or in white over an already dark area when `ink` is false.
+    pub fn text_ink(&mut self, text: &str, mut x: i16, y: i16, size: u8, bold: bool, ink: bool) {
         for cp in text.chars() {
             if let Some((bytes, at, base)) = glyph(cp, size, bold) {
                 let offset = base + u32_at(bytes, at + 4);
@@ -64,7 +101,7 @@ impl Canvas<'_> {
                         if bytes[offset + bit / 8] & (128 >> (bit % 8)) != 0 {
                             let gx = x + left + px as i16;
                             let gy = y + size as i16 - top + py as i16;
-                            self.pixel(gx, gy);
+                            self.set(gx, gy, ink);
                         }
                     }
                 }

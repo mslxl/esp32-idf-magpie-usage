@@ -36,31 +36,68 @@ static void *s_action_context;
 static note4_ui_t *s_ui, *s_candidate;
 static note4_presenter_t *s_presenter;
 static zectrix_epd_handle_t s_epd;
-static uint8_t *s_previous_frame;
-static bool s_has_frame;
+static TaskHandle_t s_task;
+
+/* The battery module samples at this cadence; it bounds the task's sleep. */
+#define BATTERY_POLL_US 5000000LL
+#ifdef NOTE4_DEV_CAPTURE
+/* Development builds also service USB screenshot commands. */
+#define CAPTURE_POLL_US 100000LL
+#endif
+
+static void wake_screen(void) {
+    if (s_task != NULL) xTaskNotifyGive(s_task);
+}
 
 typedef struct {
     const note4_quota_snapshot_t *quotas;
     const note4_display_prefs_t *prefs;
 } quota_source_t;
 
-static const char *source_text(const void *context, size_t card, uint32_t section,
-                               size_t child, const char *field) {
-    const quota_source_t *source = context;
-    if (section == 1U) return note4_quota_window_text(source->quotas, card, child, field);
-    if (section == 2U) {
-        const char *value = note4_quota_balance_text(source->quotas, card, child, field);
-        return !strcmp(field, "error") && value[0] ? "unavailable" : value;
-    }
-    if (!strcmp(field, "readDeferred")) return note4_quota_flag(source->quotas, card, field) ? "true" : "false";
-    /* Provider error bodies never cross into the UI. */
-    if (!strcmp(field, "error")) return note4_quota_text(source->quotas, card, field)[0] ? "unavailable" : "";
-    return note4_quota_text(source->quotas, card, field);
+static void source_card(const void *context, size_t card, note4_ui_card_t *out) {
+    const note4_quota_snapshot_t *quotas = ((const quota_source_t *)context)->quotas;
+    *out = (note4_ui_card_t){
+        .provider = note4_quota_text(quotas, card, "provider"),
+        .name = note4_quota_text(quotas, card, "name"),
+        .user = note4_quota_text(quotas, card, "user"),
+        .plan = note4_quota_text(quotas, card, "plan"),
+        .alias = note4_quota_text(quotas, card, "alias"),
+        .seat = note4_quota_text(quotas, card, "seat"),
+        .from = note4_quota_text(quotas, card, "from"),
+        .kind = note4_quota_text(quotas, card, "kind"),
+        .balance = note4_quota_text(quotas, card, "balance"),
+        .until = note4_quota_text(quotas, card, "until"),
+        .renew = note4_quota_text(quotas, card, "renew"),
+        .as_of = note4_quota_text(quotas, card, "asOf"),
+        .read_at = note4_quota_text(quotas, card, "readAt"),
+        .read_deferred = note4_quota_flag(quotas, card, "readDeferred"),
+        /* Provider error bodies never cross into the UI. */
+        .failed = note4_quota_text(quotas, card, "error")[0] != '\0',
+        .windows = note4_quota_window_count(quotas, card),
+        .balances = note4_quota_balance_count(quotas, card),
+    };
 }
-static size_t source_children(const void *context, size_t card, uint32_t section) {
-    const quota_source_t *source = context;
-    return section == 1U ? note4_quota_window_count(source->quotas, card)
-        : note4_quota_balance_count(source->quotas, card);
+static void source_window(const void *context, size_t card, size_t child, note4_ui_window_t *out) {
+    const note4_quota_snapshot_t *quotas = ((const quota_source_t *)context)->quotas;
+#define WINDOW_TEXT(field) note4_quota_window_text(quotas, card, child, field)
+    *out = (note4_ui_window_t){
+        .name = WINDOW_TEXT("name"), .display = WINDOW_TEXT("display"),
+        .used = WINDOW_TEXT("used"), .remaining = WINDOW_TEXT("remaining"),
+        .resets_at = WINDOW_TEXT("resetsAt"), .reset_secs = WINDOW_TEXT("resetSecs"),
+        .amount = WINDOW_TEXT("amount"), .limit = WINDOW_TEXT("limit"),
+        .unit = WINDOW_TEXT("unit"), .pool = WINDOW_TEXT("pool"),
+        .holds_why = WINDOW_TEXT("holdsWhy"),
+        .unlimited = note4_quota_window_flag(quotas, card, child, "unlimited"),
+    };
+#undef WINDOW_TEXT
+}
+static void source_balance(const void *context, size_t card, size_t part, note4_ui_balance_t *out) {
+    const note4_quota_snapshot_t *quotas = ((const quota_source_t *)context)->quotas;
+    *out = (note4_ui_balance_t){
+        .label = note4_quota_balance_text(quotas, card, part, "label"),
+        .text = note4_quota_balance_text(quotas, card, part, "text"),
+        .failed = note4_quota_balance_text(quotas, card, part, "error")[0] != '\0',
+    };
 }
 static uint32_t source_visible(const void *context, size_t card) {
     const quota_source_t *source = context;
@@ -81,7 +118,8 @@ static size_t source_rank(const void *context, size_t card) {
     }
     return rank;
 }
-static note4_ui_status_t ui_status(const note4_provisioning_snapshot_t *snapshot) {
+static note4_ui_status_t ui_status(const note4_provisioning_snapshot_t *snapshot,
+                                   uint32_t wifi_retry_seconds) {
     return (note4_ui_status_t){
         .state = snapshot->state, .slot = snapshot->slot, .round = snapshot->round,
         .storage_error = snapshot->storage_error, .pairing = snapshot->pairing,
@@ -91,67 +129,48 @@ static note4_ui_status_t ui_status(const note4_provisioning_snapshot_t *snapshot
         .layout = snapshot->display_layout, .adaptive = snapshot->adaptive_font,
         .now = (int64_t)time(NULL), .timezone = snapshot->display_timezone[0] ? snapshot->display_timezone : "UTC",
         .ble_name = note4_ble_provisioning_name(),
+        .language = snapshot->display_language,
+        .wifi_retry_seconds = wifi_retry_seconds,
     };
 }
 static esp_err_t build_layout(note4_ui_t *ui, const note4_quota_snapshot_t *quotas,
                               const note4_ui_status_t *status) {
     const quota_source_t context = {quotas, s_prefs};
-    const note4_ui_source_t source = {&context, note4_quota_count(quotas), source_text,
-        source_children, source_visible, source_rank};
+    const note4_ui_source_t source = {&context, note4_quota_count(quotas), source_card,
+        source_window, source_balance, source_visible, source_rank};
     return note4_ui_build(ui, &source, status) == 0 ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
+static const char *mode_name(note4_present_mode_t mode) {
+    return mode == NOTE4_PRESENT_FULL ? "full" : mode == NOTE4_PRESENT_PARTIAL ? "partial" : "none";
+}
 static esp_err_t render_frame(const note4_ui_t *ui, const note4_ui_status_t *status,
                                uint32_t page, bool available, uint32_t buttons, unsigned layout_ms) {
     const int64_t started = esp_timer_get_time();
-    uint16_t *pixels = note4_presenter_rgb565_frame(s_presenter);
-    if (note4_ui_draw(ui, status, page, available, pixels, note4_presenter_rgb565_pixels()) != 0) return ESP_FAIL;
-    unsigned min_x = NOTE4_WIDTH, min_y = NOTE4_HEIGHT, max_x = 0U, max_y = 0U;
-    for (unsigned y = 0U; y < NOTE4_HEIGHT; ++y) {
-        for (unsigned x = 0U; x < NOTE4_WIDTH; ++x) {
-            const unsigned index = y * NOTE4_WIDTH + x;
-            const bool black = pixels[index] == 0U;
-            const bool previous = (s_previous_frame[index / 8U] & (0x80U >> (index % 8U))) != 0U;
-            if (!s_has_frame || black != previous) {
-                if (x < min_x) min_x = x;
-                if (x > max_x) max_x = x;
-                if (y < min_y) min_y = y;
-                if (y > max_y) max_y = y;
-            }
-        }
-    }
+    if (note4_ui_draw(ui, status, page, available, note4_presenter_frame(s_presenter), NOTE4_FRAME_BYTES) != 0)
+        return ESP_FAIL;
+    note4_rect_t damage[NOTE4_DAMAGE_MAX_RECTS];
+    const size_t count = note4_presenter_damage(s_presenter, damage, NOTE4_DAMAGE_MAX_RECTS);
     const int64_t drawn = esp_timer_get_time();
+    note4_present_mode_t mode = NOTE4_PRESENT_NONE;
     esp_err_t err = ESP_OK;
-    if (min_y < NOTE4_HEIGHT) {
-        /* Align partial updates with the controller's byte columns. */
-        min_x &= ~7U; max_x = max_x | 7U;
-        const note4_rect_t damage = {min_x, min_y, max_x - min_x + 1U, max_y - min_y + 1U};
-        note4_present_mode_t mode;
+    if (count != 0U) {
         err = zectrix_epd_power_on(s_epd);
         if (err == ESP_OK) {
-            err = note4_presenter_present(s_presenter, s_epd, &damage, 1U, !s_has_frame,
-                                          NULL, 0U, 128U, &mode);
+            err = note4_presenter_present(s_presenter, s_epd, damage, count, false, drawn, &mode);
             const esp_err_t off = zectrix_epd_power_off(s_epd);
             if (err == ESP_OK) err = off;
         }
-        if (err == ESP_OK) {
-            memset(s_previous_frame, 0, NOTE4_FRAME_BYTES);
-            for (unsigned index = 0U; index < NOTE4_WIDTH * NOTE4_HEIGHT; ++index)
-                if (pixels[index] == 0U) s_previous_frame[index / 8U] |= 0x80U >> (index % 8U);
-            s_has_frame = true;
-            ESP_LOGI(TAG, "Rust frame presented in 1bpp mode");
-        } else s_has_frame = false;
     }
-    ESP_LOGI(TAG, "frame_timing buttons=%u ui_ms=%u draw_ms=%u panel_ms=%u regions=%u",
+    ESP_LOGI(TAG, "frame_timing buttons=%u ui_ms=%u draw_ms=%u panel_ms=%u regions=%u mode=%s",
         (unsigned)buttons, layout_ms, (unsigned)((drawn - started) / 1000),
-        (unsigned)((esp_timer_get_time() - drawn) / 1000), min_y < NOTE4_HEIGHT ? 1U : 0U);
+        (unsigned)((esp_timer_get_time() - drawn) / 1000), (unsigned)count, mode_name(mode));
     return err;
 }
 static esp_err_t create_runtime(void) {
     s_ui = heap_caps_aligned_alloc(note4_ui_align(), note4_ui_size(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_candidate = heap_caps_aligned_alloc(note4_ui_align(), note4_ui_size(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_previous_frame = heap_caps_calloc(1U, NOTE4_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_ui == NULL || s_candidate == NULL || s_previous_frame == NULL) return ESP_ERR_NO_MEM;
+    if (s_ui == NULL || s_candidate == NULL) return ESP_ERR_NO_MEM;
     note4_ui_init(s_ui); note4_ui_init(s_candidate);
     esp_err_t err = note4_presenter_create(&s_presenter);
     if (err != ESP_OK) return err;
@@ -160,8 +179,45 @@ static esp_err_t create_runtime(void) {
     ESP_LOGI(TAG, "native_ui arena_bytes=%u buffers=2", (unsigned)note4_ui_size());
     return zectrix_epd_new(&config, &s_epd);
 }
+/* Counts the announced Wi-Fi retry delay down from the snapshot that set it. */
+typedef struct {
+    uint32_t announced;
+    int64_t base_us;
+} wifi_retry_t;
+
+static void wifi_retry_observe(wifi_retry_t *retry, const note4_provisioning_snapshot_t *snapshot, int64_t now_us) {
+    const uint32_t announced = snapshot->state == NOTE4_PROVISIONING_FAILURE ? snapshot->wifi_retry_seconds : 0U;
+    if (announced != retry->announced) {
+        retry->announced = announced;
+        retry->base_us = now_us;
+    }
+}
+static int64_t wifi_retry_remaining_us(const wifi_retry_t *retry, int64_t now_us) {
+    const int64_t remaining = (int64_t)retry->announced * 1000000LL - (now_us - retry->base_us);
+    return remaining > 0 ? remaining : 0;
+}
+static bool status_page(const note4_provisioning_snapshot_t *snapshot) {
+    return snapshot->state != NOTE4_PROVISIONING_CONNECTED || snapshot->magpie_phase == NOTE4_MAGPIE_FAILED;
+}
+/* Sleep until the next battery sample, the displayed retry minute changes or
+ * the committed layout goes stale, whichever comes first. */
+static TickType_t wait_ticks(const wifi_retry_t *retry, int64_t now_us, int64_t now, int64_t stale_at) {
+    int64_t wait_us = BATTERY_POLL_US;
+#ifdef NOTE4_DEV_CAPTURE
+    wait_us = CAPTURE_POLL_US;
+#endif
+    const int64_t remaining = wifi_retry_remaining_us(retry, now_us);
+    if (remaining > 0) {
+        const int64_t minute_step = (remaining - 1) % 60000000LL + 1;
+        if (minute_step < wait_us) wait_us = minute_step;
+    }
+    if (stale_at > now && stale_at - now < wait_us / 1000000LL) wait_us = (stale_at - now) * 1000000LL;
+    const TickType_t ticks = pdMS_TO_TICKS((uint32_t)((wait_us + 999) / 1000));
+    return ticks == 0U ? 1U : ticks;
+}
 static void screen_task(void *arg) {
     (void)arg;
+    s_task = xTaskGetCurrentTaskHandle();
     ESP_ERROR_CHECK(create_runtime());
 #ifdef NOTE4_DEV_CAPTURE
     ESP_ERROR_CHECK(note4_capture_init());
@@ -171,22 +227,30 @@ static void screen_task(void *arg) {
     note4_provisioning_snapshot_t snapshot;
     note4_provisioning_init(&snapshot);
     note4_provisioning_snapshot_t laid_out = snapshot;
-    uint32_t page = 0U;
+    wifi_retry_t wifi_retry = {0};
+    uint32_t page = 0U, shown_retry_minutes = 0U;
     bool dirty = true, layout_dirty = true;
-    int64_t last_minute = -1, next_diagnostic = 0;
+    int64_t built_at = 0, next_diagnostic = 0;
     for (;;) {
+        const int64_t now_us = esp_timer_get_time();
         if (xQueueReceive(s_snapshots, &snapshot, 0U) == pdTRUE) dirty = true;
-        note4_ui_status_t status = ui_status(&snapshot);
-        const note4_battery_t battery = note4_battery_poll(esp_timer_get_time());
+        wifi_retry_observe(&wifi_retry, &snapshot, now_us);
+        const int64_t retry_us = wifi_retry_remaining_us(&wifi_retry, now_us);
+        note4_ui_status_t status = ui_status(&snapshot, (uint32_t)((retry_us + 999999) / 1000000));
+        const uint32_t retry_minutes = (status.wifi_retry_seconds + 59U) / 60U;
+        if (retry_minutes != shown_retry_minutes) dirty = true;
+        const note4_battery_t battery = note4_battery_poll(now_us);
         status.battery_percent = battery.percent;
         status.battery_flags = (battery.valid ? 1U : 0U) | (battery.charging ? 2U : 0U) | (battery.full ? 4U : 0U);
         if (battery.valid != shown_battery.valid || battery.charging != shown_battery.charging ||
             battery.full != shown_battery.full || (battery.valid && battery.percent != shown_battery.percent)) dirty = true;
-        const bool top_changed = (laid_out.state != NOTE4_PROVISIONING_CONNECTED || laid_out.magpie_phase == 6U)
-            != (snapshot.state != NOTE4_PROVISIONING_CONNECTED || snapshot.magpie_phase == 6U);
-        if (top_changed || laid_out.display_layout != snapshot.display_layout ||
-            laid_out.adaptive_font != snapshot.adaptive_font || strcmp(laid_out.display_timezone, snapshot.display_timezone) ||
-            last_minute != status.now / 60) layout_dirty = true;
+        /* Absolute times only go stale at a reset, local midnight or an offset
+         * change; a clock that moved backwards invalidates them too. */
+        const int64_t stale_at = note4_ui_next_change(s_ui);
+        if (status_page(&laid_out) != status_page(&snapshot) || laid_out.display_layout != snapshot.display_layout ||
+            laid_out.adaptive_font != snapshot.adaptive_font || laid_out.display_language != snapshot.display_language ||
+            strcmp(laid_out.display_timezone, snapshot.display_timezone) ||
+            status.now >= stale_at || status.now < built_at) layout_dirty = true;
         portENTER_CRITICAL(&s_quota_lock);
         note4_quota_snapshot_t *next_quotas = s_pending_quotas; s_pending_quotas = NULL;
         const bool quotas_changed = s_quotas_changed; s_quotas_changed = false;
@@ -216,13 +280,13 @@ static void screen_task(void *arg) {
         uint32_t next_page = pages == 0U ? 0U : page < pages ? page : pages - 1U;
         uint32_t button = UINT32_MAX;
         if (xQueueReceive(s_buttons, &button, 0U) == pdTRUE) {
+            const bool paging = !snapshot.storage_error && !snapshot.pairing &&
+                                snapshot.state != NOTE4_PROVISIONING_CONFIGURING;
             if (button == NOTE4_BUTTON_OK || snapshot.state == NOTE4_PROVISIONING_DISCARD_DIALOG) {
                 if (s_action_handler != NULL) s_action_handler(button == NOTE4_BUTTON_OK
                     ? NOTE4_PROVISIONING_EVENT_OK : NOTE4_PROVISIONING_EVENT_CANCEL, s_action_context);
-            } else if (!snapshot.storage_error && !snapshot.pairing && snapshot.state != NOTE4_PROVISIONING_CONFIGURING &&
-                       button == NOTE4_BUTTON_UP && next_page > 0U) --next_page;
-            else if (!snapshot.storage_error && !snapshot.pairing && snapshot.state != NOTE4_PROVISIONING_CONFIGURING &&
-                     button == NOTE4_BUTTON_DOWN && next_page + 1U < pages) ++next_page;
+            } else if (paging && button == NOTE4_BUTTON_UP && next_page > 0U) --next_page;
+            else if (paging && button == NOTE4_BUTTON_DOWN && next_page + 1U < pages) ++next_page;
             dirty = true;
         }
         if (dirty && err == ESP_OK) err = render_frame(draw_ui, &status, next_page, quotas != NULL,
@@ -243,9 +307,12 @@ static void screen_task(void *arg) {
                 accepted ? 1U : 0U, err == ESP_OK ? 1 : -1, (int)err, (unsigned)note4_quota_count(s_quotas));
         }
         if (accepted) {
-            if (rebuild) { note4_ui_t *previous = s_ui; s_ui = s_candidate; s_candidate = previous; }
-            page = next_page; laid_out = snapshot; last_minute = status.now / 60;
-            shown_battery = battery;
+            if (rebuild) {
+                note4_ui_t *previous = s_ui; s_ui = s_candidate; s_candidate = previous;
+                built_at = status.now;
+            }
+            page = next_page; laid_out = snapshot;
+            shown_battery = battery; shown_retry_minutes = retry_minutes;
             dirty = false; layout_dirty = false;
         }
         if (esp_timer_get_time() >= next_diagnostic) {
@@ -256,11 +323,15 @@ static void screen_task(void *arg) {
         }
         if (err != ESP_OK) { ESP_LOGE(TAG, "Rust render failed: %s", esp_err_to_name(err)); vTaskDelay(pdMS_TO_TICKS(1000)); }
 #ifdef NOTE4_DEV_CAPTURE
-        note4_capture_poll(s_previous_frame, page, note4_ui_pages(s_ui),
-            accepted && s_has_frame && s_quotas != NULL && status.state == NOTE4_PROVISIONING_CONNECTED &&
-            !status.pairing && !status.storage_error && !status.error_page && status.phase != 6U);
+        note4_capture_poll(note4_presenter_shown(s_presenter), page, note4_ui_pages(s_ui),
+            accepted && s_quotas != NULL && status.state == NOTE4_PROVISIONING_CONNECTED &&
+            !status.pairing && !status.storage_error && !status.error_page && status.phase != NOTE4_MAGPIE_FAILED);
 #endif
-        vTaskDelay(pdMS_TO_TICKS(20));
+        /* Pending work (a vetoed publication, a failed render or queued
+         * buttons) loops again at once; otherwise sleep until woken. */
+        if (dirty || layout_dirty || uxQueueMessagesWaiting(s_buttons) != 0U) continue;
+        (void)ulTaskNotifyTake(pdTRUE, wait_ticks(&wifi_retry, esp_timer_get_time(),
+            (int64_t)time(NULL), note4_ui_next_change(s_ui)));
     }
 }
 esp_err_t note4_screen_init(note4_screen_action_handler_t handler, void *context) {
@@ -268,12 +339,14 @@ esp_err_t note4_screen_init(note4_screen_action_handler_t handler, void *context
     s_snapshots = xQueueCreate(1U, sizeof(note4_provisioning_snapshot_t));
     s_buttons = xQueueCreate(8U, sizeof(uint32_t));
     if (s_snapshots == NULL || s_buttons == NULL) return ESP_ERR_NO_MEM;
-    return xTaskCreateWithCaps(screen_task, "note4_screen", 32768U, NULL, tskIDLE_PRIORITY, NULL,
+    return xTaskCreateWithCaps(screen_task, "note4_screen", 32768U, NULL, tskIDLE_PRIORITY, &s_task,
                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 esp_err_t note4_screen_render(const note4_provisioning_snapshot_t *snapshot) {
     if (snapshot == NULL || s_snapshots == NULL) return ESP_ERR_INVALID_STATE;
-    return xQueueOverwrite(s_snapshots, snapshot) == pdTRUE ? ESP_OK : ESP_FAIL;
+    if (xQueueOverwrite(s_snapshots, snapshot) != pdTRUE) return ESP_FAIL;
+    wake_screen();
+    return ESP_OK;
 }
 void note4_screen_stage_quotas(note4_quota_snapshot_t *snapshot, unsigned epoch,
     note4_screen_quota_handler_t handler, void *context) {
@@ -288,6 +361,7 @@ void note4_screen_stage_quotas(note4_quota_snapshot_t *snapshot, unsigned epoch,
     portEXIT_CRITICAL(&s_quota_lock);
     if (previous_handler != NULL) previous_handler(previous, previous_epoch, false, previous_context);
     note4_quota_snapshot_release(previous);
+    wake_screen();
 }
 void note4_screen_publish_quotas(note4_quota_snapshot_t *snapshot) {
     note4_screen_stage_quotas(snapshot, 0U, NULL, NULL);
@@ -299,8 +373,9 @@ void note4_screen_publish_prefs(note4_display_prefs_t *prefs) {
     s_pending_prefs = prefs; s_prefs_changed = true;
     portEXIT_CRITICAL(&s_quota_lock);
     note4_display_prefs_release(previous);
+    wake_screen();
 }
 void note4_screen_button(note4_button_id_t button) {
     const uint32_t value = button;
-    (void)xQueueSend(s_buttons, &value, 0U);
+    if (xQueueSend(s_buttons, &value, 0U) == pdTRUE) wake_screen();
 }

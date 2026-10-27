@@ -11,130 +11,104 @@
     } \
 } while (0)
 
-static uint16_t pixels[NOTE4_WIDTH * NOTE4_HEIGHT];
-static uint8_t guarded_frame[NOTE4_FRAME_BYTES + 2U];
-static uint8_t *const frame = guarded_frame + 1U;
-static uint8_t guarded_gray[NOTE4_4BPP_FRAME_BYTES + 2U];
-static uint8_t *const gray = guarded_gray + 1U;
+static uint8_t previous[NOTE4_FRAME_BYTES], next[NOTE4_FRAME_BYTES];
 
-static void reset_frame(void) {
-    memset(guarded_frame, 0xA5, sizeof(guarded_frame));
+static void reset(void) {
+    memset(previous, 0, sizeof(previous));
+    memset(next, 0, sizeof(next));
 }
 
-static void check_guards(void) {
-    CHECK(guarded_frame[0] == 0xA5);
-    CHECK(guarded_frame[NOTE4_FRAME_BYTES + 1U] == 0xA5);
+static void set(uint8_t *frame, size_t x, size_t y) {
+    frame[y * NOTE4_ROW_BYTES + x / 8U] |= (uint8_t)(0x80U >> (x % 8U));
 }
 
-static void test_full_frames(void) {
-    CHECK(NOTE4_FRAME_BYTES == 15000U);
-    reset_frame();
-    memset(pixels, 0, sizeof(pixels));
-    CHECK(note4_rgb565_to_1bpp_rows(pixels, NOTE4_WIDTH * NOTE4_HEIGHT,
-                                   0, NOTE4_HEIGHT, frame, NOTE4_FRAME_BYTES, 128));
-    for (size_t i = 0; i < NOTE4_FRAME_BYTES; ++i) CHECK(frame[i] == 0);
-    check_guards();
-
-    memset(pixels, 0xFF, sizeof(pixels));
-    CHECK(note4_rgb565_to_1bpp_rows(pixels, NOTE4_WIDTH * NOTE4_HEIGHT,
-                                   0, NOTE4_HEIGHT, frame, NOTE4_FRAME_BYTES, 128));
-    for (size_t i = 0; i < NOTE4_FRAME_BYTES; ++i) CHECK(frame[i] == 0xFF);
-    check_guards();
+static bool equal(note4_rect_t rect, size_t x, size_t y, size_t width, size_t height) {
+    return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
 
-static void test_bit_order_rows_and_edges(void) {
-    reset_frame();
-    memset(pixels, 0, sizeof(pixels));
-    pixels[0] = 0xFFFF;
-    pixels[7] = 0xFFFF;
-    pixels[8] = 0xFFFF;
-    pixels[399] = 0xFFFF;
-    pixels[400] = 0xFFFF;
-    CHECK(note4_rgb565_to_1bpp_rows(pixels, 800, 1, 2,
-                                   frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(frame[50] == 0x81);
-    CHECK(frame[51] == 0x80);
-    CHECK(frame[99] == 0x01);
-    CHECK(frame[100] == 0x80);
-    for (size_t i = 0; i < 50; ++i) CHECK(frame[i] == 0xA5);
-    for (size_t i = 150; i < NOTE4_FRAME_BYTES; ++i) CHECK(frame[i] == 0xA5);
-    check_guards();
-
-    CHECK(note4_rgb565_to_1bpp_rows(pixels, 400, 299, 1,
-                                   frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(frame[14950] == 0x81);
-    CHECK(frame[14999] == 0x01);
-    check_guards();
+static void test_identical_frames_have_no_damage(void) {
+    note4_rect_t rects[NOTE4_DAMAGE_MAX_RECTS];
+    reset();
+    CHECK(note4_frame_damage(previous, next, rects, NOTE4_DAMAGE_MAX_RECTS) == 0U);
+    CHECK(note4_frame_damage(NULL, next, rects, NOTE4_DAMAGE_MAX_RECTS) == 0U);
+    CHECK(note4_frame_damage(previous, next, rects, 0U) == 0U);
 }
 
-static void test_luminance_and_threshold(void) {
-    reset_frame();
-    memset(pixels, 0, sizeof(pixels));
-    const uint16_t colors[] = {0x0000, 0xFFFF, 0xF800, 0x07E0,
-                               0x001F, 0x7BEF, 0x8410, 0xFFFF};
-    memcpy(pixels, colors, sizeof(colors));
-    CHECK(note4_rgb565_to_1bpp_rows(pixels, 400, 0, 1,
-                                   frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(frame[0] == 0x53); /* black, white, red, green, blue, dark, light, white */
-    CHECK(note4_rgb565_to_1bpp_rows(pixels, 400, 0, 1,
-                                   frame, NOTE4_FRAME_BYTES, 0));
-    for (size_t i = 0; i < NOTE4_ROW_BYTES; ++i) CHECK(frame[i] == 0xFF);
-    CHECK(note4_rgb565_to_1bpp_rows(pixels, 400, 0, 1,
-                                   frame, NOTE4_FRAME_BYTES, 255));
-    CHECK(frame[0] == 0x41);
-    check_guards();
+static void test_separate_bands_are_byte_aligned(void) {
+    note4_rect_t rects[NOTE4_DAMAGE_MAX_RECTS];
+    reset();
+    set(next, 3, 10);
+    set(next, 20, 12); /* within the merge gap of row 10 */
+    set(next, 399, 299);
+    set(next, 200, 100);
+    CHECK(note4_frame_damage(previous, next, rects, NOTE4_DAMAGE_MAX_RECTS) == 3U);
+    CHECK(equal(rects[0], 0, 10, 24, 3));
+    CHECK(equal(rects[1], 200, 100, 8, 1));
+    CHECK(equal(rects[2], 392, 299, 8, 1));
 }
 
-static void test_4bpp_and_rectangles(void) {
-    memset(pixels, 0, sizeof(pixels));
-    pixels[0] = 0xFFFF;
-    pixels[1] = 0x7BEF;
-    pixels[2] = 0x0000;
-    const note4_rect_t gray_region = {0, 0, 3, 1};
-    memset(guarded_gray, 0xA5, sizeof(guarded_gray));
-    CHECK(note4_rgb565_to_4bpp_frame(
-        pixels, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH, &gray_region, 1,
-        gray, NOTE4_4BPP_FRAME_BYTES, 128));
-    CHECK(gray[0] == 0xF7);
-    CHECK(gray[1] == 0x00);
-    CHECK(guarded_gray[0] == 0xA5);
-    CHECK(guarded_gray[NOTE4_4BPP_FRAME_BYTES + 1U] == 0xA5);
-
-    memset(guarded_frame, 0xA5, sizeof(guarded_frame));
-    memset(pixels, 0, sizeof(pixels));
-    pixels[10] = 0xFFFF;
-    pixels[11] = 0xFFFF;
-    pixels[410] = 0xFFFF;
-    const note4_rect_t rect = {10, 0, 2, 2};
-    CHECK(note4_rgb565_to_1bpp_rect(
-        pixels, NOTE4_WIDTH * NOTE4_HEIGHT, NOTE4_WIDTH, rect, frame, 2, 128));
-    CHECK(frame[0] == 0xC0);
-    CHECK(frame[1] == 0x80);
-    CHECK(guarded_frame[0] == 0xA5);
-    CHECK(guarded_frame[NOTE4_FRAME_BYTES + 1U] == 0xA5);
+static void test_merge_gap_boundary(void) {
+    note4_rect_t rects[NOTE4_DAMAGE_MAX_RECTS];
+    reset();
+    set(next, 0, 0);
+    set(next, 0, 1U + NOTE4_DAMAGE_MERGE_ROWS); /* exactly MERGE_ROWS unchanged rows */
+    CHECK(note4_frame_damage(previous, next, rects, NOTE4_DAMAGE_MAX_RECTS) == 1U);
+    CHECK(equal(rects[0], 0, 0, 8, 2U + NOTE4_DAMAGE_MERGE_ROWS));
+    reset();
+    set(next, 0, 0);
+    set(next, 0, 2U + NOTE4_DAMAGE_MERGE_ROWS);
+    CHECK(note4_frame_damage(previous, next, rects, NOTE4_DAMAGE_MAX_RECTS) == 2U);
 }
 
-static void test_rejected_arguments(void) {
-    reset_frame();
-    CHECK(!note4_rgb565_to_1bpp_rows(NULL, 400, 0, 1, frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 400, 0, 1, NULL, NOTE4_FRAME_BYTES, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 399, 0, 1, frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 400, 0, 1, frame, NOTE4_FRAME_BYTES - 1, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 400, 0, 1, frame, NOTE4_FRAME_BYTES + 1, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 400, 0, 0, frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 400, 300, 1, frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 800, 299, 2, frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, 400, SIZE_MAX, 1, frame, NOTE4_FRAME_BYTES, 128));
-    CHECK(!note4_rgb565_to_1bpp_rows(pixels, SIZE_MAX, 0, SIZE_MAX, frame, NOTE4_FRAME_BYTES, 128));
-    for (size_t i = 0; i < sizeof(guarded_frame); ++i) CHECK(guarded_frame[i] == 0xA5);
+static void test_excess_bands_merge_closest_neighbours(void) {
+    note4_rect_t rects[NOTE4_DAMAGE_MAX_RECTS];
+    reset();
+    /* Bands at rows 0, 40, 60, 120, 200 and 280: the 40/60 gap is smallest,
+     * then 0 joins 40-60; the 80-row gaps further down stay separate. */
+    const size_t rows[] = {0, 40, 60, 120, 200, 280};
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) set(next, 8U * i, rows[i]);
+    CHECK(note4_frame_damage(previous, next, rects, NOTE4_DAMAGE_MAX_RECTS) == 4U);
+    CHECK(equal(rects[0], 0, 0, 24, 61));
+    CHECK(equal(rects[1], 24, 120, 8, 1));
+    CHECK(equal(rects[2], 32, 200, 8, 1));
+    CHECK(equal(rects[3], 40, 280, 8, 1));
+    CHECK(note4_frame_damage(previous, next, rects, 1U) == 1U);
+    CHECK(equal(rects[0], 0, 0, 48, 281));
+}
+
+static void test_every_row_changed_is_one_rect(void) {
+    note4_rect_t rects[NOTE4_DAMAGE_MAX_RECTS];
+    reset();
+    memset(next, 0xFF, sizeof(next));
+    CHECK(note4_frame_damage(previous, next, rects, NOTE4_DAMAGE_MAX_RECTS) == 1U);
+    CHECK(equal(rects[0], 0, 0, NOTE4_WIDTH, NOTE4_HEIGHT));
+}
+
+static void test_pack_inverts_for_the_panel(void) {
+    uint8_t guarded[6];
+    uint8_t *packed = guarded + 1;
+    reset();
+    next[NOTE4_ROW_BYTES + 1] = 0x0F;
+    next[2 * NOTE4_ROW_BYTES + 2] = 0x80;
+    memset(guarded, 0xA5, sizeof(guarded));
+    CHECK(note4_frame_pack(next, (note4_rect_t){8, 1, 16, 2}, packed, 4));
+    CHECK(packed[0] == 0xF0 && packed[1] == 0xFF && packed[2] == 0xFF && packed[3] == 0x7F);
+    CHECK(guarded[0] == 0xA5 && guarded[5] == 0xA5);
+    CHECK(note4_frame_pack(next, (note4_rect_t){392, 299, 8, 1}, packed, 1) && packed[0] == 0xFF);
+    CHECK(!note4_frame_pack(next, (note4_rect_t){3, 1, 8, 1}, packed, 1));
+    CHECK(!note4_frame_pack(next, (note4_rect_t){8, 1, 16, 2}, packed, 3));
+    CHECK(!note4_frame_pack(next, (note4_rect_t){392, 299, 16, 1}, packed, 2));
+    CHECK(!note4_frame_pack(NULL, (note4_rect_t){0, 0, 8, 1}, packed, 1));
 }
 
 int main(void) {
-    test_full_frames();
-    test_bit_order_rows_and_edges();
-    test_luminance_and_threshold();
-    test_4bpp_and_rectangles();
-    test_rejected_arguments();
-    puts("PASS: 1bpp, 4bpp, rectangles, luminance, and bounds");
+    CHECK(NOTE4_FRAME_BYTES == 15000U);
+    test_identical_frames_have_no_damage();
+    test_separate_bands_are_byte_aligned();
+    test_merge_gap_boundary();
+    test_excess_bands_merge_closest_neighbours();
+    test_every_row_changed_is_one_rect();
+    test_pack_inverts_for_the_panel();
+    puts("PASS: row-band damage, merging, cap and panel packing");
     return EXIT_SUCCESS;
 }

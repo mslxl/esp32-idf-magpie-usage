@@ -13,7 +13,7 @@ just flash-dev
 just screenshot
 ```
 
-开发固件只需烧录一次，即可重复 `just screenshot`。按设备 UP/DOWN 切换页面后再次截图。截图不改变设置、布局或页码，不触发重绘；导出屏幕任务最近成功呈现并接受的 1bpp 帧缓冲。截图期间屏幕任务会短暂用于 USB 导出，网络任务与 LED 定时器独立运行。
+开发固件只需烧录一次，即可重复 `just screenshot`。按设备 UP/DOWN 切换页面后再次截图。截图不改变设置、布局或页码，不触发重绘；导出屏幕任务最近成功呈现并接受的 1bpp 帧缓冲（呈现器的已显示帧，Rust 直接绘制的同一格式，无 RGB565 转换）。开发构建的屏幕任务每 100ms 唤醒一次以处理截图命令；release 只在事件或截止时间唤醒。截图期间屏幕任务会短暂用于 USB 导出，网络任务与 LED 定时器独立运行。
 
 默认 PNG 和 JSON 校验信息保存到忽略目录 `.note4-build/validation/screenshots/`，使用带微秒的时间戳命名，不覆盖已有文件。`NOTE4_PORT` 覆盖 COM5。工具通过 uv 使用固定版本 pyserial，不需要手动安装。
 
