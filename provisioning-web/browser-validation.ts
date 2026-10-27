@@ -86,7 +86,7 @@ try {
     await page.addInitScript(() => {
       let listener: ((event: unknown) => void) | undefined;
       const status = { addEventListener: (_: string, fn: (event: unknown) => void) => { listener = fn; },
-        startNotifications: async () => status };
+        removeEventListener: () => { listener = undefined; }, startNotifications: async () => status };
       (window as any).note4Notify = (bytes: number[]) => {
         const value = new Uint8Array(bytes);
         listener?.({ target: { value: new DataView(value.buffer) } });
@@ -94,33 +94,39 @@ try {
       const write = { writeValueWithResponse: async (value: ArrayBuffer) =>
         (window as any).note4Write(Array.from(new Uint8Array(value))) };
       Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: {
-        requestDevice: async () => ({ name: 'magpie-usage-test', addEventListener: () => {},
-          gatt: { connect: async () => ({ getPrimaryService: async () => ({
+        requestDevice: async () => ({ name: 'magpie-usage-test', addEventListener: () => {}, removeEventListener: () => {},
+          gatt: { connected: true, disconnect: () => {}, connect: async () => ({ getPrimaryService: async () => ({
             getCharacteristic: async (uuid: string) => uuid.startsWith('7c2e0003') ? status : write,
           }) }) } }),
       } });
     });
     await page.goto('http://127.0.0.1:5174/');
-    await page.getByRole('button', { name: '连接设备' }).click();
-    await page.getByText('已读取设备配置；密码和 Key 不会从设备传回网页').waitFor();
+    const loaded = 'Configuration loaded. Saved passwords and Web keys are never sent back to this page.';
+    const savedText = 'Settings saved. The device is still in setup mode.';
+    await page.getByRole('button', { name: 'Connect device' }).click();
+    await page.getByText(loaded).waitFor();
     const cards = page.locator('section.slot');
-    const add = page.getByRole('button', { name: '添加 Wi-Fi' });
+    const add = page.locator('button.add-slot');
+    const saveNetwork = page.locator('[data-action="save-network"]');
+    const saveMagpie = page.locator('[data-action="save-magpie"]');
+    const tab = (name: string) => page.locator(`[role="tab"][data-tab="${name}"]`);
     if (await cards.count() !== Math.max(1, saved.length)) throw new Error('wrong loaded card count');
     for (let i = 0; i < saved.length; i++) {
       if (await cards.nth(i).locator('input[type=text]').inputValue() !== saved[i]) throw new Error('saved slot moved');
     }
     if (saved.length === 0) {
-      if (await cards.first().locator('input[type=text]').count() !== 1 || await cards.first().locator('select').count()) throw new Error('duplicate SSID control');
-      await page.getByRole('button', { name: '扫描 Wi‑Fi' }).click();
-      await page.getByText('扫描完成', { exact: true }).waitFor();
+      if (await cards.first().locator('input[type=text]').count() !== 1) throw new Error('duplicate SSID control');
+      await page.getByRole('button', { name: 'Scan for Wi‑Fi' }).click();
+      await page.getByText('Scan complete: 1 networks found.', { exact: true }).waitFor();
+      if (await page.locator('.scan-item .scan-ssid').first().textContent() !== 'Test AP') throw new Error('scan list missing result');
       const ssidInput = cards.first().locator('input[type=text]');
       const resultsId = await ssidInput.getAttribute('list');
       if (await page.locator(`datalist#${resultsId} option[value="Test AP"]`).count() !== 1) throw new Error('scanned network missing from SSID suggestions');
-      if (await add.count()) throw new Error('add visible before configuration');
+      if (!await add.isDisabled()) throw new Error('add enabled before configuration');
       await page.screenshot({ path: fileURLToPath(new URL('one-slot.png', output)), fullPage: true });
       await cards.first().locator('input[type=text]').fill('Network 1');
       await cards.first().locator('select').selectOption('1');
-      if (await add.count()) throw new Error('add visible with missing new password');
+      if (!await add.isDisabled()) throw new Error('add enabled with missing new password');
       const passwordInput = cards.first().locator('input[type=password]');
       await passwordInput.click();
       for (const character of 'test-password') {
@@ -131,75 +137,76 @@ try {
       for (let count = 1; count < 5; count++) {
         await add.click();
         if (await cards.count() !== count + 1) throw new Error('add did not create one card');
-        if (await add.count()) throw new Error('add visible with empty newest card');
+        if (!await add.isDisabled()) throw new Error('add enabled with empty newest card');
         await cards.nth(count).locator('input[type=text]').fill(`Network ${count + 1}`);
       }
-      if (await add.count()) throw new Error('add exceeds five slots');
-      await page.getByRole('button', { name: '应用设置' }).click();
-      await page.getByText('设置已保存，仍处于设置模式', { exact: true }).waitFor();
+      if (!await add.isDisabled()) throw new Error('add exceeds five slots');
+      await saveNetwork.click();
+      await page.getByText(savedText, { exact: true }).waitFor();
       if (JSON.stringify(written) !== '[0,1,2,3,4]') throw new Error('not all wire slots sent');
     } else if (saved.length === 2) {
       await add.click();
       if (await cards.count() !== 3) throw new Error('cannot append saved slots');
       await page.screenshot({ path: fileURLToPath(new URL('three-slots.png', output)), fullPage: true });
-      await page.getByRole('button', { name: '应用设置' }).click();
-      await page.getByText('设置已保存，仍处于设置模式', { exact: true }).waitFor();
+      await saveNetwork.click();
+      await page.getByText(savedText, { exact: true }).waitFor();
       if (JSON.stringify(written) !== '[0,1,2,3,4]') throw new Error('hidden empty slots not cleared');
     }
     if (saved.length === 0) {
-      const apply = page.getByRole('button', { name: '应用设置', exact: true });
-      if (!await apply.isEnabled()) throw new Error('saving exited setup');
-      await page.getByRole('tab', { name: 'Magpie 配置' }).click();
-      const endpoint = page.getByRole('textbox', { name: 'Magpie endpoint' });
+      if (!await saveNetwork.isEnabled()) throw new Error('saving exited setup');
+      await tab('magpie').click();
+      const endpoint = page.getByLabel('Magpie web address', { exact: true });
       await endpoint.click();
       for (const character of 'https://magpie.test/proxy') {
         await page.keyboard.type(character);
         if (!await endpoint.evaluate(input => input === document.activeElement)) throw new Error('endpoint lost focus');
       }
-      await page.getByLabel('Key 处理', { exact: true }).selectOption('1');
-      const key = page.getByLabel('Magpie Key', { exact: true });
+      await page.getByLabel('Web key', { exact: true }).selectOption('1');
+      const key = page.getByLabel('New Web key', { exact: true });
       await key.click();
       for (const character of 'web-key-0123456789') {
         await page.keyboard.type(character);
         if (!await key.evaluate(input => input === document.activeElement)) throw new Error('key lost focus');
       }
-      await page.getByRole('tab', { name: '网络', exact: true }).click();
+      await tab('network').click();
       if (await cards.first().locator('input[type=text]').inputValue() !== 'Network 1') throw new Error('tab switch lost network edits');
-      await page.getByRole('tab', { name: 'Magpie 配置' }).click();
+      await tab('magpie').click();
       if (await key.inputValue() !== 'web-key-0123456789') throw new Error('tab switch lost key');
-      await page.getByLabel('允许明文 HTTP').check();
-      await page.getByLabel('额度读取间隔', { exact: true }).fill('120');
-      await page.getByLabel('显示时区', { exact: true }).fill('America/New_York');
-      await page.getByLabel('额度布局', { exact: true }).selectOption('B');
-      await page.getByLabel('自适应字号').uncheck();
-      await apply.click();
-      await page.getByText('设置已保存，仍处于设置模式', { exact: true }).waitFor();
-      if (committedMagpie.flags !== 5 || committedMagpie.interval !== 120 || committedMagpie.timezone !== 'America/New_York') throw new Error('Web display settings not saved');
+      await page.getByLabel('Allow plain HTTP (unencrypted)').check();
+      await page.locator('#magpie-interval').fill('120');
+      await page.locator('#magpie-timezone').fill('America/New_York');
+      await page.locator('#magpie-layout').selectOption('B');
+      await page.getByLabel('Adaptive font size').uncheck();
+      await page.locator('#magpie-language').selectOption('zh');
+      await saveMagpie.click();
+      await page.getByText(savedText, { exact: true }).waitFor();
+      if (committedMagpie.flags !== 13 || committedMagpie.interval !== 120 || committedMagpie.timezone !== 'America/New_York') throw new Error('Web display settings not saved');
       if (await key.count()) throw new Error('key not cleared after save');
-      if (!await apply.isEnabled()) throw new Error('Magpie save exited setup');
+      if (!await saveMagpie.isEnabled()) throw new Error('Magpie save exited setup');
       if (committedMagpie.endpoint !== 'https://magpie.test/proxy' || !committedMagpie.keyPresent || network[0].ssid !== 'Network 1') throw new Error('Magpie save did not preserve settings');
-      await page.getByRole('tab', { name: '网络', exact: true }).click();
-      await apply.click();
-      await page.getByText('设置已保存，仍处于设置模式', { exact: true }).waitFor();
+      await tab('network').click();
+      await saveNetwork.click();
+      await page.getByText(savedText, { exact: true }).waitFor();
       if (!committedMagpie.keyPresent) throw new Error('network save cleared Magpie');
       await page.reload();
-      await page.getByRole('button', { name: '连接设备' }).click();
-      await page.getByText('已读取设备配置；密码和 Key 不会从设备传回网页').waitFor();
-      await page.getByRole('tab', { name: 'Magpie 配置' }).click();
+      await page.getByRole('button', { name: 'Connect device' }).click();
+      await page.getByText(loaded).waitFor();
+      await tab('magpie').click();
       if (await endpoint.inputValue() !== 'https://magpie.test/proxy' || await key.count()) throw new Error('metadata reload exposed or lost saved configuration');
-      if (await page.getByLabel('额度读取间隔', { exact: true }).inputValue() !== '120' ||
-          await page.getByLabel('显示时区', { exact: true }).inputValue() !== 'America/New_York' ||
-          await page.getByLabel('额度布局', { exact: true }).inputValue() !== 'B' ||
-          !await page.getByLabel('允许明文 HTTP').isChecked() || await page.getByLabel('自适应字号').isChecked()) throw new Error('reconnect lost saved Web display settings');
+      if (await page.locator('#magpie-interval').inputValue() !== '120' ||
+          await page.locator('#magpie-timezone').inputValue() !== 'America/New_York' ||
+          await page.locator('#magpie-layout').inputValue() !== 'B' ||
+          await page.locator('#magpie-language').inputValue() !== 'zh' ||
+          !await page.getByLabel('Allow plain HTTP (unencrypted)').isChecked() || await page.getByLabel('Adaptive font size').isChecked()) throw new Error('reconnect lost saved Web display settings');
       await page.screenshot({ path: fileURLToPath(new URL('magpie-settings.png', output)), fullPage: true });
-      await page.getByRole('button', { name: '退出设置模式', exact: true }).click();
-      await page.getByText('已退出设置模式，设备将使用已保存的配置', { exact: true }).waitFor();
-      if (await apply.isEnabled()) throw new Error('explicit exit did not stop editing');
+      await page.getByRole('button', { name: 'Exit setup', exact: true }).click();
+      await page.getByText('Setup finished. The device will use the saved settings.', { exact: true }).waitFor();
+      if (await saveMagpie.isEnabled()) throw new Error('explicit exit did not stop editing');
     }
     if (errors.length) throw new Error(errors.join('\n'));
     await page.close();
   }
-  console.log('PASS: empty configuration shows one card; + requires completed visible slots; appends one at a time; caps at five; restores saved/sparse slots; submits all five wire slots');
+  console.log('PASS: empty configuration shows one card; Add network requires completed visible slots; appends one at a time; caps at five; restores saved/sparse slots; submits all five wire slots');
 } finally {
   await browser.close();
   await server.close();

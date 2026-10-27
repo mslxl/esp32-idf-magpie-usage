@@ -35,6 +35,9 @@ function activate(node: Node): void {
   if (node instanceof Element) for (const [event, handler] of Object.entries(handlers.get(node) ?? {})) node.addEventListener(event, handler);
   for (const child of node.childNodes) activate(child);
 }
+// A dialog's "open" attribute is managed by showModal()/close(), not by rendering.
+const browserOwned = (node: Element, attribute: string) => attribute === "open" && node.nodeName === "DIALOG";
+
 function patch(current: Node, next: Node): void {
   if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName ||
       (current instanceof Element && next instanceof Element && current.getAttribute("data-key") !== next.getAttribute("data-key"))) {
@@ -44,7 +47,9 @@ function patch(current: Node, next: Node): void {
     if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
     return;
   }
-  for (const attribute of [...current.attributes]) if (!next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+  for (const attribute of [...current.attributes]) {
+    if (!next.hasAttribute(attribute.name) && !browserOwned(current, attribute.name)) current.removeAttribute(attribute.name);
+  }
   for (const attribute of next.attributes) if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
   for (const [event, handler] of Object.entries(handlers.get(current) ?? {})) current.removeEventListener(event, handler);
   const events = handlers.get(next) ?? {}; handlers.set(current, events);

@@ -1,3 +1,6 @@
+import { ProtocolDataError, ValidationError, type FieldId } from "./errors";
+import type { MessageKey } from "./i18n";
+
 export const PROTOCOL_VERSION = 1;
 export const MAX_PAYLOAD = 192;
 export const MAX_SLOTS = 5;
@@ -131,18 +134,18 @@ export function splitPayload(payload: Uint8Array, max = MAX_PAYLOAD): Uint8Array
   return chunks;
 }
 
-function encodeUtf8(value: string, limit: number, field: string): Uint8Array {
+function encodeUtf8(value: string, limit: number, field: FieldId, key: MessageKey): Uint8Array {
   const bytes = new TextEncoder().encode(value);
-  if (bytes.length > limit) throw new Error(`${field} too long`);
+  if (bytes.length > limit) throw new ValidationError(key, { max: limit }, field);
   return bytes;
 }
 
 export function encodeSetSlotPayload(value: SetSlotPayload): Uint8Array {
-  const ssid = encodeUtf8(value.ssid, MAX_SSID_BYTES, "SSID");
+  const ssid = encodeUtf8(value.ssid, MAX_SSID_BYTES, "ssid", "validation.ssidTooLong");
   const password = value.passwordMode === PasswordMode.Set
-    ? encodeUtf8(value.password ?? "", MAX_PASSWORD_BYTES, "password")
+    ? encodeUtf8(value.password ?? "", MAX_PASSWORD_BYTES, "password", "validation.passwordTooLong")
     : new Uint8Array();
-  if (value.passwordMode === PasswordMode.Set && password.length === 0) throw new Error("password is empty");
+  if (value.passwordMode === PasswordMode.Set && password.length === 0) throw new ValidationError("validation.passwordEmpty", {}, "password");
   const payload = new Uint8Array(3 + ssid.length + (value.passwordMode === PasswordMode.Set ? 1 + password.length : 0));
   payload[0] = value.ssid.length === 0 ? 0 : 1;
   payload[1] = value.passwordMode;
@@ -187,20 +190,20 @@ export type MagpieMetadata = { endpoint: string; keyPresent: boolean };
 export type MagpieSettings = MagpieMetadata & { key: string; keyMode: PasswordModeValue };
 
 export function validateEndpoint(endpoint: string): void {
-  if (/[\x00-\x20\x7f]/.test(endpoint) || !/^https?:\/\/[^/?#@\\\s]+(?:\/[^?#@\\\s]*)?$/.test(endpoint)) throw new Error("请输入有效的 http/https Magpie 网关地址，不要包含账号、query 或 fragment");
+  if (/[\x00-\x20\x7f]/.test(endpoint) || !/^https?:\/\/[^/?#@\\\s]+(?:\/[^?#@\\\s]*)?$/.test(endpoint)) throw new ValidationError("validation.endpointFormat", {}, "endpoint");
   const authority = endpoint.split("/")[2];
   const match = /^(?:\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::([0-9]+))?$/.exec(authority);
-  if (!match || (match[1] !== undefined && (Number(match[1]) < 1 || Number(match[1]) > 65535))) throw new Error("Magpie 网关主机或端口无效");
+  if (!match || (match[1] !== undefined && (Number(match[1]) < 1 || Number(match[1]) > 65535))) throw new ValidationError("validation.endpointHost", {}, "endpoint");
 }
 
 export function encodeSetMagpiePayload(value: MagpieSettings, savedEndpoint: string): Uint8Array {
-  const endpoint = encodeUtf8(value.endpoint, MAX_ENDPOINT_BYTES, "endpoint");
+  const endpoint = encodeUtf8(value.endpoint, MAX_ENDPOINT_BYTES, "endpoint", "validation.endpointTooLong");
   if (value.endpoint) validateEndpoint(value.endpoint);
-  if (![PasswordMode.Unchanged, PasswordMode.Set, PasswordMode.Clear].includes(value.keyMode)) throw new Error("Key 处理方式无效");
-  if (value.keyMode === PasswordMode.Unchanged && value.endpoint !== savedEndpoint) throw new Error("更换 endpoint 后请重新设置或清除 Key");
-  const key = value.keyMode === PasswordMode.Set ? encodeUtf8(value.key, MAX_KEY_BYTES, "Key") : new Uint8Array();
-  if (value.keyMode === PasswordMode.Set && (!key.length || !/^[\x21-\x7e]+$/.test(value.key))) throw new Error("Key 不能为空或包含空白及控制字符");
-  if (!endpoint.length && (key.length || (value.keyMode === PasswordMode.Unchanged && value.keyPresent))) throw new Error("清空 endpoint 时请同时清除 Key");
+  if (![PasswordMode.Unchanged, PasswordMode.Set, PasswordMode.Clear].includes(value.keyMode)) throw new ValidationError("validation.keyMode", {}, "keyMode");
+  if (value.keyMode === PasswordMode.Unchanged && value.endpoint !== savedEndpoint) throw new ValidationError("validation.keyAfterEndpointChange", {}, "keyMode");
+  const key = value.keyMode === PasswordMode.Set ? encodeUtf8(value.key, MAX_KEY_BYTES, "key", "validation.keyTooLong") : new Uint8Array();
+  if (value.keyMode === PasswordMode.Set && (!key.length || !/^[\x21-\x7e]+$/.test(value.key))) throw new ValidationError("validation.legacyKeyFormat", {}, "key");
+  if (!endpoint.length && (key.length || (value.keyMode === PasswordMode.Unchanged && value.keyPresent))) throw new ValidationError("validation.keyClearWithEndpoint", {}, "keyMode");
   const payload = new Uint8Array(5 + endpoint.length + key.length);
   const view = new DataView(payload.buffer);
   payload[0] = value.keyMode;
@@ -212,9 +215,9 @@ export function encodeSetMagpiePayload(value: MagpieSettings, savedEndpoint: str
 }
 
 export function decodeMagpieMetadata(payload: Uint8Array): MagpieMetadata {
-  if (payload.length < 3) throw new Error("invalid Magpie metadata");
+  if (payload.length < 3) throw new ProtocolDataError("invalid Magpie metadata");
   const length = payload[0] | payload[1] << 8;
-  if (length > MAX_ENDPOINT_BYTES || payload.length !== length + 3 || payload[2] > 1) throw new Error("invalid Magpie metadata length");
+  if (length > MAX_ENDPOINT_BYTES || payload.length !== length + 3 || payload[2] > 1) throw new ProtocolDataError("invalid Magpie metadata length");
   const endpoint = new TextDecoder("utf-8", { fatal: true }).decode(payload.slice(3));
   if (endpoint) validateEndpoint(endpoint);
   return { endpoint, keyPresent: payload[2] !== 0 };
@@ -222,12 +225,17 @@ export function decodeMagpieMetadata(payload: Uint8Array): MagpieMetadata {
 
 import { SUPPORTED_TIMEZONES } from "../../supported-timezones";
 export { SUPPORTED_TIMEZONES };
+/** Language of the text rendered on the device screen (web settings flag bit 3). */
+export type DeviceLanguage = "en" | "zh";
 export type WebMetadata = MagpieMetadata & { revision: number; allowPlainHttp: boolean;
-  intervalSeconds: number; timezone: string; layout: "A" | "B"; adaptiveFont: boolean };
+  intervalSeconds: number; timezone: string; layout: "A" | "B"; adaptiveFont: boolean; language: DeviceLanguage };
+
+export const WebFlag = { AllowPlainHttp: 1, AdaptiveFont: 2, LayoutB: 4, Chinese: 8 } as const;
+const KNOWN_WEB_FLAGS = 15;
 export type WebSettings = WebMetadata & { key: string; keyMode: PasswordModeValue };
 
 export function encodeBegin(revision: number): Uint8Array {
-  if (!Number.isInteger(revision) || revision < 0 || revision > 0xffffffff) throw new Error("无效配置版本");
+  if (!Number.isInteger(revision) || revision < 0 || revision > 0xffffffff) throw new ValidationError("validation.revision");
   const bytes = new Uint8Array(5);
   bytes[0] = 2;
   new DataView(bytes.buffer).setUint32(1, revision, true);
@@ -237,19 +245,20 @@ export function encodeBegin(revision: number): Uint8Array {
 function validateWeb(value: WebMetadata): void {
   encodeBegin(value.revision);
   if (value.endpoint) validateEndpoint(value.endpoint);
-  if (value.endpoint.startsWith("http://") && !value.allowPlainHttp) throw new Error("使用 HTTP 必须显式允许明文连接");
-  if (!Number.isInteger(value.intervalSeconds) || value.intervalSeconds < 30 || value.intervalSeconds > 3600) throw new Error("读取间隔必须为 30～3600 秒");
-  if (value.timezone && !(SUPPORTED_TIMEZONES as readonly string[]).includes(value.timezone)) throw new Error("设备不支持该 IANA 时区");
-  if (value.layout !== "A" && value.layout !== "B") throw new Error("无效布局");
+  if (value.endpoint.startsWith("http://") && !value.allowPlainHttp) throw new ValidationError("validation.httpNotAllowed", {}, "http");
+  if (!Number.isInteger(value.intervalSeconds) || value.intervalSeconds < 30 || value.intervalSeconds > 3600) throw new ValidationError("validation.interval", {}, "interval");
+  if (value.timezone && !(SUPPORTED_TIMEZONES as readonly string[]).includes(value.timezone)) throw new ValidationError("validation.timezone", {}, "timezone");
+  if (value.layout !== "A" && value.layout !== "B") throw new ValidationError("validation.layout", {}, "layout");
+  if (value.language !== "en" && value.language !== "zh") throw new ValidationError("validation.language", {}, "language");
 }
 
 export function canonicalEndpoint(endpoint: string): string {
   if (!endpoint) return "";
   validateEndpoint(endpoint);
-  if (new TextEncoder().encode(endpoint).length > MAX_ENDPOINT_BYTES) throw new Error("Web 地址过长");
+  if (new TextEncoder().encode(endpoint).length > MAX_ENDPOINT_BYTES) throw new ValidationError("validation.endpointTooLong", { max: MAX_ENDPOINT_BYTES }, "endpoint");
   const parts = /^(https?):\/\/([^/]+)(.*)$/.exec(endpoint)!;
   const path = parts[3].replace(/\/+$/, "");
-  if (path.includes("%") || path.includes("//") || path.split("/").some((segment) => segment === "." || segment === "..")) throw new Error("Web 地址路径有歧义");
+  if (path.includes("%") || path.includes("//") || path.split("/").some((segment) => segment === "." || segment === "..")) throw new ValidationError("validation.endpointPath", {}, "endpoint");
   const authority = parts[2].toLowerCase().replace(/:([0-9]+)$/, (_, digits: string) => {
     const port = Number(digits);
     return port === (parts[1] === "https" ? 443 : 80) ? "" : `:${port}`;
@@ -260,18 +269,19 @@ export function canonicalEndpoint(endpoint: string): string {
 export function encodeWebSettings(value: WebSettings, savedEndpoint: string): Uint8Array {
   validateWeb(value);
   const normalized = canonicalEndpoint(value.endpoint);
-  const endpoint = encodeUtf8(normalized, MAX_ENDPOINT_BYTES, "Web 地址");
-  const timezone = encodeUtf8(value.timezone, 63, "时区");
-  if (![0, 1, 2].includes(value.keyMode)) throw new Error("无效 Web key 操作");
-  if (value.keyMode === PasswordMode.Unchanged && normalized !== canonicalEndpoint(savedEndpoint)) throw new Error("更换 Web 地址后请重新设置 Web key");
-  const key = value.keyMode === PasswordMode.Set ? encodeUtf8(value.key, 256, "Web key") : new Uint8Array();
-  if (value.keyMode === PasswordMode.Set && (key.length < 16 || !/^[A-Za-z0-9._~-]+$/.test(value.key))) throw new Error("Web key 必须是 16～256 字节的字母、数字或 -._~");
-  if (!endpoint.length && (key.length || (value.keyMode === PasswordMode.Unchanged && value.keyPresent))) throw new Error("清空 Web 地址时请同时清除 Web key");
+  const endpoint = encodeUtf8(normalized, MAX_ENDPOINT_BYTES, "endpoint", "validation.endpointTooLong");
+  const timezone = encodeUtf8(value.timezone, 63, "timezone", "validation.timezone");
+  if (![0, 1, 2].includes(value.keyMode)) throw new ValidationError("validation.keyMode", {}, "keyMode");
+  if (value.keyMode === PasswordMode.Unchanged && normalized !== canonicalEndpoint(savedEndpoint)) throw new ValidationError("validation.keyAfterEndpointChange", {}, "keyMode");
+  const key = value.keyMode === PasswordMode.Set ? encodeUtf8(value.key, 256, "key", "validation.keyFormat") : new Uint8Array();
+  if (value.keyMode === PasswordMode.Set && (key.length < 16 || !/^[A-Za-z0-9._~-]+$/.test(value.key))) throw new ValidationError("validation.keyFormat", {}, "key");
+  if (!endpoint.length && (key.length || (value.keyMode === PasswordMode.Unchanged && value.keyPresent))) throw new ValidationError("validation.keyClearWithEndpoint", {}, "keyMode");
   const bytes = new Uint8Array(14 + endpoint.length + key.length + timezone.length);
   const view = new DataView(bytes.buffer);
   bytes.set(encodeBegin(value.revision));
   bytes[5] = value.keyMode;
-  bytes[6] = (value.allowPlainHttp ? 1 : 0) | (value.adaptiveFont ? 2 : 0) | (value.layout === "B" ? 4 : 0);
+  bytes[6] = (value.allowPlainHttp ? WebFlag.AllowPlainHttp : 0) | (value.adaptiveFont ? WebFlag.AdaptiveFont : 0) |
+    (value.layout === "B" ? WebFlag.LayoutB : 0) | (value.language === "zh" ? WebFlag.Chinese : 0);
   view.setUint16(7, value.intervalSeconds, true);
   bytes[9] = timezone.length;
   view.setUint16(10, endpoint.length, true);
@@ -283,13 +293,16 @@ export function encodeWebSettings(value: WebSettings, savedEndpoint: string): Ui
 }
 
 export function decodeWebSettings(bytes: Uint8Array): WebMetadata {
-  if (bytes.length < 12 || bytes[0] !== 2 || bytes[5] > 1 || bytes[6] > 7) throw new Error("不支持 Web 设置 schema，请升级固件");
+  if (bytes.length < 12 || bytes[0] !== 2 || bytes[5] > 1 || bytes[6] > KNOWN_WEB_FLAGS) {
+    throw new ProtocolDataError("unsupported web settings schema", "error.firmwareUpgrade");
+  }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const endpointLength = view.getUint16(10, true), zoneLength = bytes[9];
-  if (endpointLength > 512 || zoneLength > 63 || bytes.length !== 12 + endpointLength + zoneLength) throw new Error("无效 Web 设置长度");
+  if (endpointLength > 512 || zoneLength > 63 || bytes.length !== 12 + endpointLength + zoneLength) throw new ProtocolDataError("invalid web settings length");
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const value: WebMetadata = { revision: view.getUint32(1, true), keyPresent: bytes[5] === 1,
-    allowPlainHttp: Boolean(bytes[6] & 1), adaptiveFont: Boolean(bytes[6] & 2), layout: bytes[6] & 4 ? "B" : "A",
+    allowPlainHttp: Boolean(bytes[6] & WebFlag.AllowPlainHttp), adaptiveFont: Boolean(bytes[6] & WebFlag.AdaptiveFont),
+    layout: bytes[6] & WebFlag.LayoutB ? "B" : "A", language: bytes[6] & WebFlag.Chinese ? "zh" : "en",
     intervalSeconds: view.getUint16(7, true), endpoint: decoder.decode(bytes.slice(12, 12 + endpointLength)),
     timezone: decoder.decode(bytes.slice(12 + endpointLength)) };
   validateWeb(value);
@@ -297,20 +310,34 @@ export function decodeWebSettings(bytes: Uint8Array): WebMetadata {
 }
 
 export function decodeStatusPayload(payload: Uint8Array): DeviceStatus {
-  if (payload.length < 2) throw new Error("invalid STATUS payload");
+  if (payload.length < 2) throw new ProtocolDataError("invalid STATUS payload");
   const state = payload[0];
   const configuredMask = payload[1];
   const slots: DeviceSlot[] = [];
   let offset = 2;
   for (let index = 0; index < MAX_SLOTS; index += 1) {
-    if (offset >= payload.length) throw new Error("missing status slot");
+    if (offset >= payload.length) throw new ProtocolDataError("missing status slot");
     const ssidLength = payload[offset++];
-    if (ssidLength > MAX_SSID_BYTES || offset + ssidLength + 1 > payload.length) throw new Error("invalid status SSID");
+    if (ssidLength > MAX_SSID_BYTES || offset + ssidLength + 1 > payload.length) throw new ProtocolDataError("invalid status SSID");
     const ssid = new TextDecoder().decode(payload.slice(offset, offset + ssidLength));
     offset += ssidLength;
     const passwordPresent = payload[offset++] !== 0;
     slots.push({ ssid, passwordPresent });
   }
-  if (offset !== payload.length) throw new Error("unexpected status data");
+  if (offset !== payload.length) throw new ProtocolDataError("unexpected status data");
   return { state, configuredMask, slots };
+}
+
+export type ScanResult = { ssid: string; rssi: number; channel: number; secure: boolean };
+
+export function decodeScanResult(payload: Uint8Array): ScanResult {
+  const length = payload[0];
+  if (!length || payload.length !== length + 4) throw new ProtocolDataError("invalid scan result");
+  const rawRssi = payload[length + 1];
+  return {
+    ssid: new TextDecoder().decode(payload.slice(1, length + 1)),
+    rssi: rawRssi > 127 ? rawRssi - 256 : rawRssi,
+    channel: payload[length + 2],
+    secure: payload[length + 3] !== 0,
+  };
 }

@@ -44,7 +44,8 @@ describe("NOTE4 BLE protocol", () => {
   });
 
   it("rejects a password set operation without a password", () => {
-    expect(() => encodeSetSlotPayload({ ssid: "home", passwordMode: PasswordMode.Set })).toThrow("password is empty");
+    expect(() => encodeSetSlotPayload({ ssid: "home", passwordMode: PasswordMode.Set }))
+      .toThrow(expect.objectContaining({ key: "validation.passwordEmpty", field: "password" }));
   });
 
   it("rejects an enabled slot without an SSID", () => {

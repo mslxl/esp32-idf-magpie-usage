@@ -12,6 +12,7 @@ it("reads a complete stable directory across UTF-8 byte chunks and rejects corru
   let listener: ((frame: Frame) => void) | undefined, corrupt = false;
   const transport = {
     onEvent(next: (frame: Frame) => void) { listener = next; return () => { listener = undefined; }; },
+    onDisconnect() { return () => {}; },
     async send(opcode: number, payload: Uint8Array) {
       const token = 42;
       const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
