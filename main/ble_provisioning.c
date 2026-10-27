@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ble_pairing.h"
+
 #include "esp_mac.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -12,6 +14,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "host/ble_hs.h"
+#include "host/ble_sm.h"
+#include "host/ble_store.h"
 #include "host/ble_uuid.h"
 #include "host/ble_gap.h"
 #include "host/util/util.h"
@@ -71,7 +75,7 @@ static void start_advertising(void);
 static bool connection_is_authenticated(uint16_t conn_handle) {
     struct ble_gap_conn_desc desc;
     return ble_gap_conn_find(conn_handle, &desc) == 0 &&
-        desc.sec_state.encrypted && desc.sec_state.authenticated;
+        note4_ble_link_usable(desc.sec_state.encrypted, desc.sec_state.authenticated);
 }
 
 static int characteristic_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -193,9 +197,28 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
             (void)xQueueSend(s_events, &queued, 0);
         }
         break;
-    case BLE_GAP_EVENT_REPEAT_PAIRING:
-        /* A stale bond must be removed explicitly in the central's Bluetooth settings. */
-        return BLE_GAP_REPEAT_PAIRING_IGNORE;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* The central still has a bond whose keys no longer match this device.
+         * Ignoring it leaves the link unencrypted on every retry, so replace
+         * the stale local record only when the new pairing still requires a
+         * passkey and bonding. The central must enter the fresh six-digit code. */
+        struct ble_gap_conn_desc desc = {0};
+        const note4_ble_repeat_action_t action = note4_ble_repeat_pairing_action(
+            ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0,
+            event->repeat_pairing.new_authenticated,
+            event->repeat_pairing.new_bonding);
+        if (action == NOTE4_BLE_REPEAT_IGNORE) {
+            ESP_LOGW(TAG, "repeat pairing ignored: passkey authentication or bonding not requested");
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
+        }
+        ESP_LOGW(TAG, "replacing stale bond after repeat pairing");
+        if (ble_store_util_delete_peer(&desc.peer_id_addr) != 0) {
+            /* Retrying without removing the old record would loop in the stack. */
+            ESP_LOGE(TAG, "stale bond could not be deleted");
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == s_status_handle) atomic_store(&s_status_subscribed, event->subscribe.cur_notify != 0);
         break;
@@ -301,6 +324,12 @@ esp_err_t note4_ble_provisioning_start(void) {
     ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;
+    /* ESP-IDF defaults both masks to zero. Without the identity bit a bonded
+     * central's resolvable address cannot be matched to its stored bond. */
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    /* Restores persisted bonds into the RAM store on every start; the default
+     * NVS partition was initialized by note4_config_store_init() before setup. */
     ble_store_config_init();
     s_running = true;
     nimble_port_freertos_init(host_task);

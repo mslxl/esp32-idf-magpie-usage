@@ -1,5 +1,19 @@
 # NOTE4 validation history
 
+## BLE bond persistence and stale-bond recovery — 2026-10-27
+
+NimBLE bonding was previously RAM-only: leaving setup stopped the stack, and the next `ble_store_config_init()` rebuilt an empty store while the host still held its bond. `CONFIG_BT_NIMBLE_NVS_PERSIST=y` now stores the peer and local security records in the default `nvs` partition under `nimble_bond`; `note4_cfg` is unchanged. By the time BLE can start, `note4_config_store_init()` has already initialized the default partition. ESP-IDF leaves both key-distribution masks at zero, so the firmware now sets encryption and identity key-distribution masks in both directions. A repeated pairing from a bonded peer is no longer ignored: the stale local record is deleted and the pairing continues only when the new request is still authenticated (passkey) and bonded. `CONFIG_BT_NIMBLE_HANDLE_REPEAT_PAIRING_DELETION` remains unset so this decision stays in the application. The pure decision functions are covered by the new host test `ble_pairing`; they do not execute NimBLE or the radio.
+
+Verification on 2026-10-27:
+
+- `just test`: CTest 15/15 passed, including the new `ble_pairing` case; the screenshot-tool tests passed 4/4.
+- `bun run --cwd provisioning-web test`: 9 files, 48 tests passed. `bun run --cwd provisioning-web build` completed TypeScript checking and the Vite production build.
+- `just build` (release, ESP-IDF 6.1) completed, and the release capture check reported no screenshot source, protocol markers or entry points.
+- Generated `sdkconfig` contains `CONFIG_BT_NIMBLE_NVS_PERSIST=y` and `CONFIG_BT_NIMBLE_MAX_BONDS=3`. The build compiles `ble_store_nvs.c`, the map contains `ble_store_config_conf_init` and the peer-security persistence symbols, and the application binary contains the `nimble_bond` namespace string.
+- A CMake guard in the root `CMakeLists.txt` stops the build with an explicit message when an existing `sdkconfig` still leaves `CONFIG_BT_NIMBLE_NVS_PERSIST` unset. Both the enabled and rejected paths were exercised; an unset value cannot silently produce firmware without persistence.
+
+This host reported no Bluetooth adapter, so the actual central-side behavior remains unverified: reconnect within setup, leave and re-enter setup, cold-boot reconnect, host-side bond deletion, and a stale host bond that no longer matches the device. Those cases are listed in `docs/note4-acceptance.md` item 26 and remain pending. Nothing was flashed, committed or pushed in this change.
+
 ## USB navigation timing — 2026-10-26
 
 A temporary COM5 test firmware accepted only `NAV UP` / `NAV DOWN` and submitted PRESS events through the existing coordinator button queue. Numeric timestamps measured from command recognition on the device to the end of the normal screen render/presentation path. This bypasses physical GPIO debounce and DOWN-release detection, and excludes host-to-device delivery before command recognition. Driver completion includes polling SPI transfers and waiting for display BUSY and power-off completion; it does not establish visible panel quality.
@@ -287,6 +301,7 @@ The development host did not report a present Bluetooth adapter. These cases rem
 - Automatic Wi-Fi retry from FAILURE (1, 5, 15 and 30 minute backoff with the radio stopped), immediate retry on OK, and backoff reset on IP, OK, long DOWN and COMMIT.
 - Storage erase recovery: a `note4_cfg` partition reporting no free pages or a newer NVS version shows the needs-erase storage error; long DOWN erases only that partition and boot continues into setup.
 - BLE lifecycle: NimBLE starts on setup entry and stops after leaving setup, with the final ACK delivered first; MTU-sized notifications with a large MTU and eight-byte fragments with MTU 23.
+- BLE bond persistence and recovery: disconnect/reconnect inside setup, leave and re-enter setup, and cold boot reuse the stored bond without a new six-digit code; deleting the host pairing or keeping a stale host bond exercises the repeat-pairing path, which must still require a passkey and bonding.
 - Power management: DFS and light sleep in release builds (light sleep disabled in the development screenshot build), GPIO wake for buttons and charge pins, and current draw in idle, setup and failure states.
 
 The device has not been given invented network credentials for these checks. NVS/flash encryption remains disabled in this development build; product key provisioning is not covered by this validation.

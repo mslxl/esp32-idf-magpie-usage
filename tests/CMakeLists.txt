@@ -39,6 +39,18 @@ else()
 endif()
 add_test(NAME ble_protocol COMMAND test_ble_protocol)
 
+add_executable(test_ble_pairing
+    test_ble_pairing.c
+    ../main/ble_pairing.c)
+target_include_directories(test_ble_pairing PRIVATE ../main)
+target_compile_features(test_ble_pairing PRIVATE c_std_11)
+if(MSVC)
+    target_compile_options(test_ble_pairing PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_ble_pairing PRIVATE -Wall -Wextra -Werror -pedantic)
+endif()
+add_test(NAME ble_pairing COMMAND test_ble_pairing)
+
 add_executable(test_settings test_settings.c ../main/settings.c ../main/magpie_config.c
     ../main/wifi_config.c ../main/note4_bytes.c ../main/provisioning_state.c)
 target_include_directories(test_settings PRIVATE ../main)

@@ -8,6 +8,12 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# Keep bonding records in the default "nvs" partition so re-entering setup or
+# rebooting reuses an existing pairing. Settings remain in "note4_cfg".
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# Let the application decide whether a stale bond may be replaced; it keeps the
+# passkey-authentication and bonding requirements for the new pairing.
+CONFIG_BT_NIMBLE_HANDLE_REPEAT_PAIRING_DELETION=n
 CONFIG_ESP_WIFI_ENABLED=y
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
