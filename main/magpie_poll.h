@@ -10,7 +10,6 @@ typedef struct {
     bool defer_publication;
     note4_poll_mode_t mode;
     note4_magpie_result_t result;
-<<<<<<< HEAD
     uint64_t next_due, retry_after;
     uint32_t failures, unchanged, extra_wait_seconds;
     unsigned followups;
