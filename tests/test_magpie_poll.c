@@ -18,7 +18,10 @@ static int read_peer(void *p, void *bytes, size_t capacity) {
 }
 static void close_peer(void *p) { peer_t *peer = p; peer->now += peer->duration; }
 static uint64_t now_peer(void *p) { return ((peer_t *)p)->now; }
-static void wait_peer(void *p) { ((peer_t *)p)->now += 10U; }
+static void wait_peer(void *p) {
+    peer_t *peer = p;
+    peer->now += 10U;
+}
 static bool cancelled(void *p) { (void)p; return false; }
 static const char *login = "HTTP/1.1 303 See Other\r\nSet-Cookie: magpie_web_8080=web-key-0123456789; Path=/; Secure\r\n\r\n";
 static const char *ready = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]";
@@ -90,15 +93,11 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 20U; ++i) { peer.now = poll.next_due; step(&poll, &io, &peer, reading); }
     CHECK(poll.followups == 20U && poll.next_due == 155000U && poll.reading);
     peer.now = poll.next_due; step(&poll, &io, &peer, "HTTP/1.1 500 Error\r\n\r\n");
-    CHECK(poll.failed && poll.next_due == 215000U && poll.extra_wait_seconds == 0U);
-    // Sustained failures keep the cached quotas and retry banner: the poller
-    // stays failed and backs off instead of switching to a separate error page.
+    CHECK(poll.failed && poll.next_due == 215000U && poll.extra_wait_seconds == 0U && poll.failures == 1U);
     peer.now = poll.next_due; step(&poll, &io, &peer, "HTTP/1.1 500 Error\r\n\r\n");
-    const uint64_t second_due = poll.next_due;
-    CHECK(poll.failed && second_due > 215000U);
-    peer.now = second_due; step(&poll, &io, &peer, "HTTP/1.1 500 Error\r\n\r\n");
-    CHECK(poll.failed && poll.next_due > second_due);
-    peer.now = poll.next_due; step(&poll, &io, &peer, ready); CHECK(!poll.failed);
+    CHECK(poll.failed && poll.next_due > 275000U && poll.failures == 2U);
+    peer.now = poll.next_due; step(&poll, &io, &peer, ready);
+    CHECK(!poll.failed && poll.failures == 0U && poll.has_snapshot);
     peer.now = poll.next_due; step(&poll, &io, &peer, "HTTP/1.1 401 Unauthorized\r\n\r\n");
     CHECK(poll.relogin_used && !poll.halted);
     step(&poll, &io, &peer, login);
@@ -138,14 +137,15 @@ int main(int argc, char **argv) {
     replay_order(&poll, &io, &peer, "[{\"provider\":\"A\",\"windows\":[{\"used\":1.0}]},{\"provider\":\"B\",\"windows\":[{\"used\":2.0000000000000001}]}]", "BA", emit);
     replay_order(&poll, &io, &peer, "[{\"provider\":\"B\",\"windows\":[{\"used\":2.00000000000000010}]},{\"provider\":\"A\",\"windows\":[{\"used\":1e0}]}]", "BA", emit);
     peer.now = poll.next_due; step(&poll, &io, &peer, "HTTP/1.1 500 Error\r\n\r\n");
+    CHECK(poll.failed && poll.failures == 1U);
     peer.now = poll.next_due; step(&poll, &io, &peer, ready);
-    CHECK(!poll.failed);
+    CHECK(!poll.failed && poll.failures == 0U && poll.has_snapshot);
 
     clear_poll(&poll);
     settings.web.interval_seconds = 300U;
     peer.duration = 0U;
     note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 1000000U);
-    peer.now = 1000000U; step(&poll, &io, &peer, login);
+    peer.now = 1000000U; peer.duration = 0U; step(&poll, &io, &peer, login);
     CHECK(!poll.login_pending && !poll.failed);
     json_step(&poll, &io, &peer,
         "[{\"provider\":\"A\",\"user\":\"u\",\"windows\":[{\"used\":1}]},{\"provider\":\"B\",\"user\":\"u\",\"windows\":[{\"used\":2}]}]", false);
@@ -160,6 +160,68 @@ int main(int argc, char **argv) {
     json_step(&poll, &io, &peer,
         "[{\"provider\":\"A\",\"user\":\"u\",\"windows\":[{\"used\":1}]},{\"provider\":\"B\",\"user\":\"u\",\"windows\":[{\"used\":3}]}]", false);
     CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer,
+        "[{\"provider\":\"A\",\"user\":\"u\"},{\"provider\":\"B\",\"user\":\"v\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer,
+        "[{\"provider\":\"A\",\"user\":\"u\"},{\"provider\":\"B\",\"user\":\"v\"},{\"provider\":\"C\",\"user\":\"u\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"B\",\"user\":\"v\"},{\"provider\":\"C\",\"user\":\"u\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.extra_wait_seconds == 60U);
+    const uint64_t failure_now = poll.next_due;
+    note4_magpie_poll_fail(&poll, NOTE4_MAGPIE_NETWORK, &no_headers, failure_now, 1792886400, 0U);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, failure_now + 300000U);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.extra_wait_seconds == 60U);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", true);
+    CHECK(poll.extra_wait_seconds == 0U && poll.cycle_changed);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U && !poll.cycle_changed);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    CHECK(poll.unchanged == 2U);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", true);
+    CHECK(poll.unchanged == 2U);
+
+    settings.web.interval_seconds = 600U;
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 2500000U);
+    CHECK(poll.extra_wait_seconds == 0U && poll.unchanged == 0U);
+
+    clear_poll(&poll);
+    poll.defer_publication = true;
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 3000000U);
+    peer.now = 3000000U; step(&poll, &io, &peer, login);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"A\",\"user\":\"u\"}]", false);
+    CHECK(poll.order.baseline == NULL && poll.pending_order.baseline != NULL);
+    note4_magpie_poll_accept(&poll, peer.now);
+    CHECK(poll.order.baseline != NULL && !poll.failed);
+    json_step(&poll, &io, &peer, "[{\"provider\":\"B\",\"user\":\"u\"}]", false);
+    CHECK(poll.pending_order.baseline != NULL &&
+        !strcmp(note4_quota_text(poll.order.baseline, 0U, "provider"), "A"));
+    note4_magpie_poll_fail(&poll, NOTE4_MAGPIE_NETWORK, &no_headers, peer.now, 1792886400, 0U);
+    CHECK(!strcmp(note4_quota_text(poll.order.baseline, 0U, "provider"), "A"));
+    json_step(&poll, &io, &peer, "[{\"provider\":\"B\",\"user\":\"u\"}]", false);
+    note4_magpie_poll_accept(&poll, peer.now);
+    CHECK(!strcmp(note4_quota_text(poll.order.baseline, 0U, "provider"), "B") && !poll.failed);
+
+    clear_poll(&poll);
+    settings.web.interval_seconds = 3600U;
+    note4_magpie_poll_configure(&poll, &settings, NOTE4_POLL_ONLINE, 4000000U);
+    peer.now = 4000000U; step(&poll, &io, &peer, login);
+    json_step(&poll, &io, &peer, "[]", false);
+    CHECK(poll.next_due == 4000000U + 1800000U);
     note4_quota_order_clear(&poll.order);
     if (!emit) puts("magpie poll behavior passed");
     return 0;
