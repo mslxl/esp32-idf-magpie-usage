@@ -18,6 +18,8 @@ idf_component_register(
     REQUIRES ${note4_hello_requires}
         bt esp_wifi esp_netif esp_event esp_hw_support esp_pm nvs_flash esp_driver_gpio esp-tls mbedtls esp_timer lwip esp_app_format esp_adc)
 
+target_compile_definitions(${COMPONENT_LIB} PRIVATE NOTE4_RUST_LOGIC=1)
+
 if(note4_development)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE NOTE4_DEV_CAPTURE=1)
 endif()

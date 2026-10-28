@@ -3,6 +3,33 @@
 #include <string.h>
 #include <stdio.h>
 
+_Static_assert(sizeof(note4_magpie_config_t) == 770U, "Magpie config ABI changed");
+_Static_assert(offsetof(note4_magpie_config_t, key) == 513U, "Magpie config key offset changed");
+
+#ifdef NOTE4_RUST_LOGIC
+#include "note4_logic.h"
+
+bool note4_magpie_endpoint_canonicalize(const char *endpoint, char *output, size_t capacity) {
+    if (endpoint == NULL) return false;
+    return note4_rs_magpie_endpoint_canonicalize(endpoint, strlen(endpoint), output, capacity) != 0;
+}
+
+bool note4_magpie_config_validate(const note4_magpie_config_t *config) {
+    return note4_rs_magpie_config_validate(config) != 0;
+}
+
+bool note4_magpie_config_apply(note4_magpie_config_t *target,
+                               const note4_magpie_config_t *saved,
+                               const uint8_t *payload, size_t length) {
+    return note4_rs_magpie_config_apply(target, saved, payload, length) != 0;
+}
+
+size_t note4_magpie_config_metadata(const note4_magpie_config_t *config,
+                                    uint8_t *output, size_t capacity) {
+    return note4_rs_magpie_config_metadata(config, output, capacity);
+}
+#else
+
 static bool endpoint_valid(const char *url) {
     const char *host;
     if (strncmp(url, "https://", 8U) == 0) host = url + 8U;
@@ -142,3 +169,4 @@ size_t note4_magpie_config_metadata(const note4_magpie_config_t *config,
     memcpy(output + 3U, config->endpoint, length);
     return length + 3U;
 }
+#endif

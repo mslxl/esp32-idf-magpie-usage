@@ -8,6 +8,8 @@ mod resources {
     include!("../../../.note4-build/native-assets/resources.rs");
 }
 
+mod logic;
+
 use core::{
     ffi::{c_char, c_void, CStr},
     fmt::{self, Write},

@@ -1,4 +1,8 @@
 idf_component_register(INCLUDE_DIRS "include")
+
+# The compatibility header is consumed by first-party C callers in main.
+# Keep the Rust-owned implementation behind the existing component archive.
+target_include_directories(${COMPONENT_LIB} INTERFACE "${CMAKE_CURRENT_LIST_DIR}/include")
 find_program(NOTE4_CARGO cargo REQUIRED)
 set(rust_target "xtensa-esp32s3-none-elf")
 set(cargo_target "${CMAKE_CURRENT_BINARY_DIR}/cargo")
